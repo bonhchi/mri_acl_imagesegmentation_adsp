@@ -1,0 +1,19 @@
+torch==2.4.1+cu121
+torchvision==0.19.1+cu121
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+monai[all]
+torchio
+nibabel
+SimpleITK
+h5py
+ismrmrd
+pydicom
+scikit-image
+opencv-python
+scipy
+matplotlib
+tqdm
+typer[all]
+pyyaml
+sigpy

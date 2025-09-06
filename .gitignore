@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Env
+.venv/
+.env
+*.egg-info/
+
+# Data (không push lên git)
+dataset/
+outputs/
+*.nii
+*.nii.gz
+*.h5
+*.dat
+*.tar
+*.tar.gz
+*.xz
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
