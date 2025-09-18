@@ -53,7 +53,7 @@ def save_samples(model, loader, device, out_dir, cfg, max_samples=6):
     model.eval(); saved = 0
     for x, y in loader:
         x = x.to(device)
-        with torch.cuda.amp.autocast(enabled=cfg["amp"]):
+        with torch.amp.autocast("cuda", enabled=cfg.get("amp", False)):
             logits = model(x)
             if cfg["classes"] == 1:
                 preds = (torch.sigmoid(logits) > 0.5).float()
