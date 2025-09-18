@@ -8,8 +8,12 @@ from skimage.morphology import binary_opening, binary_closing, remove_small_obje
 from skimage.restoration import denoise_nl_means, estimate_sigma
 
 # ---------- FFT helpers (single-coil) ----------
-def fftshift2d(x):     return np.fft.fftshift(x, axes=(-2, -1))
-def ifftshift2d(x):    return np.fft.ifftshift(x, axes=(-2, -1))
+def fftshift2d(x):     
+    return np.fft.fftshift(x, axes=(-2, -1))
+
+def ifftshift2d(x):    
+    return np.fft.ifftshift(x, axes=(-2, -1))
+
 def ifft2c_single(k2d: np.ndarray) -> np.ndarray:
     x = ifftshift2d(k2d); x = np.fft.ifft2(x, norm="ortho"); x = fftshift2d(x)
     return np.abs(x).astype(np.float32)
@@ -108,4 +112,8 @@ def preprocess_records(
     vol = np.stack(imgs, axis=0).astype(np.float32)    # (S,1,H,W)
     prv = np.stack(prevs, axis=0).astype(np.float32)   # (S,H,W)
     msk = np.stack(masks, axis=0).astype(np.uint8)     # (S,H,W)
-    return {"tensor": torch.from_numpy(vol), "preview": prv, "mask": msk, "indices": idxs}
+    return {
+        "tensor": torch.from_numpy(vol), 
+        "preview": prv, 
+        "mask": msk, 
+        "indices": idxs}
