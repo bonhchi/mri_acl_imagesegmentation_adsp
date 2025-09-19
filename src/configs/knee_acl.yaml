@@ -1,0 +1,9 @@
+components:
+  model:
+    class_path: "src.models.unet_factory:build_unet"
+    init:
+      model: "unet" # "unet" | "unetpp"
+      encoder: "resnet34" # bất kỳ encoder smp hỗ trợ
+      encoder_weights: "imagenet" # hoặc "none"
+      in_ch: 1
+      classes: 1

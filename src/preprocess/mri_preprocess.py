@@ -31,7 +31,12 @@ import numpy as np
 import torch, torch.nn.functional as F
 
 from skimage.filters import threshold_otsu
-from skimage.morphology import binary_opening, binary_closing, remove_small_objects, disk
+from skimage.morphology import (
+    binary_opening,
+    binary_closing,
+    remove_small_objects,
+    disk,
+)
 from skimage.restoration import denoise_nl_means, estimate_sigma
 
 
@@ -39,10 +44,12 @@ from skimage.restoration import denoise_nl_means, estimate_sigma
 # 0) Helpers chung
 # ==============================================================
 
+
 def _to_float32(arr: np.ndarray) -> np.ndarray:
     """Cast an toàn sang float32, squeeze kênh dư."""
     x = np.squeeze(arr)
     return x.astype(np.float32, copy=False)
+
 
 def _ensure_2d(x: np.ndarray, name: str) -> np.ndarray:
     """Đảm bảo (H, W)."""
@@ -50,16 +57,21 @@ def _ensure_2d(x: np.ndarray, name: str) -> np.ndarray:
         raise ValueError(f"{name} phải có shape (H, W), hiện là {x.shape}")
     return x
 
-def _percentile_clip(img: np.ndarray, pmin: float = 1.0, pmax: float = 99.5) -> np.ndarray:
+
+def _percentile_clip(
+    img: np.ndarray, pmin: float = 1.0, pmax: float = 99.5
+) -> np.ndarray:
     """Clip theo percentile để bỏ outlier cường độ."""
     lo, hi = np.percentile(img, pmin), np.percentile(img, pmax)
     return np.clip(img, lo, hi)
+
 
 def _resize_np(img: np.ndarray, out_hw: Tuple[int, int]) -> np.ndarray:
     """Resize bằng PyTorch (bilinear), trả về float32 (H, W)."""
     t = torch.from_numpy(img)[None, None].float()
     t = F.interpolate(t, size=out_hw, mode="bilinear", align_corners=False)
     return t[0, 0].numpy().astype(np.float32)
+
 
 def _body_mask(img: np.ndarray) -> np.ndarray:
     """
@@ -78,6 +90,7 @@ def _body_mask(img: np.ndarray) -> np.ndarray:
     m = remove_small_objects(m.astype(bool), min_size=256)
     return m.astype(np.uint8)
 
+
 def _zscore_in_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Z-score trong vùng mask; fallback global nếu mask quá ít."""
     vals = img[mask > 0]
@@ -87,6 +100,7 @@ def _zscore_in_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
         mean, std = vals.mean(), vals.std()
     std = std if std > 1e-6 else 1.0
     return ((img - mean) / std).astype(np.float32)
+
 
 def _preview_01(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Tạo ảnh xem trước [0..1] theo min/max trong mask (fallback global)."""
@@ -102,11 +116,14 @@ def _preview_01(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
 # 1) FFT cho single-coil
 # ==============================================================
 
+
 def _fftshift2d(x: np.ndarray) -> np.ndarray:
     return np.fft.fftshift(x, axes=(-2, -1))
 
+
 def _ifftshift2d(x: np.ndarray) -> np.ndarray:
     return np.fft.ifftshift(x, axes=(-2, -1))
+
 
 def ifft2c_single(kspace_2d: np.ndarray) -> np.ndarray:
     """
@@ -125,7 +142,10 @@ def ifft2c_single(kspace_2d: np.ndarray) -> np.ndarray:
 # 2) Tuỳ chọn: N4 bias correction & NL-means denoise
 # ==============================================================
 
-def n4_bias_correction(slice_img: np.ndarray, mask: Optional[np.ndarray] = None, shrink: int = 2) -> np.ndarray:
+
+def n4_bias_correction(
+    slice_img: np.ndarray, mask: Optional[np.ndarray] = None, shrink: int = 2
+) -> np.ndarray:
     """
     N4 bias correction (SimpleITK). Nếu không có SITK, trả ảnh gốc.
     slice_img: float32 (H, W)
@@ -138,7 +158,11 @@ def n4_bias_correction(slice_img: np.ndarray, mask: Optional[np.ndarray] = None,
 
     img = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-8)
     itk_img = sitk.GetImageFromArray(img.astype(np.float32))
-    itk_mk = sitk.GetImageFromArray(mask.astype(np.uint8)) if mask is not None else sitk.OtsuThreshold(itk_img, 0, 1, 128)
+    itk_mk = (
+        sitk.GetImageFromArray(mask.astype(np.uint8))
+        if mask is not None
+        else sitk.OtsuThreshold(itk_img, 0, 1, 128)
+    )
 
     f = sitk.N4BiasFieldCorrectionImageFilter()
     f.SetMaximumNumberOfIterations([50, 50, 30, 20])
@@ -173,9 +197,18 @@ def rician_denoise(slice_img: np.ndarray) -> np.ndarray:
 # 3) Chuẩn hoá đầu vào record từ Adapter
 # ==============================================================
 
-_RECON_KEYS = ("image", "target", "reconstruction", "reconstruction_rss", "reconstruction_esc")
+_RECON_KEYS = (
+    "image",
+    "target",
+    "reconstruction",
+    "reconstruction_rss",
+    "reconstruction_esc",
+)
 
-def normalize_record_input(record: Dict[str, Any]) -> Tuple[np.ndarray, str, Dict[str, Any]]:
+
+def normalize_record_input(
+    record: Dict[str, Any]
+) -> Tuple[np.ndarray, str, Dict[str, Any]]:
     """
     Chuẩn hoá 1 record từ Adapter để sẵn sàng preprocess.
 
@@ -219,6 +252,7 @@ def normalize_record_input(record: Dict[str, Any]) -> Tuple[np.ndarray, str, Dic
 # ==============================================================
 # 4) Preprocess 1 record (1 lát)
 # ==============================================================
+
 
 def preprocess_slice_record(
     record: Dict[str, Any],
@@ -284,6 +318,7 @@ def preprocess_slice_record(
 # 5) Preprocess nhiều record (subset lát giữa volume)
 # ==============================================================
 
+
 def preprocess_records(
     records: List[Dict[str, Any]],
     out_size: Tuple[int, int] = (320, 320),
@@ -320,7 +355,7 @@ def preprocess_records(
             use_denoise=use_denoise,
             clip_percentiles=clip_percentiles,
         )
-        imgs.append(out["img_z"][None, ...])   # (1,H,W)
+        imgs.append(out["img_z"][None, ...])  # (1,H,W)
         prevs.append(out["img_01"])
         masks.append(out["mask"])
         meta = out.get("meta", {})
@@ -328,9 +363,9 @@ def preprocess_records(
         sources.append(out["source"])
         metas.append(meta)
 
-    vol = np.stack(imgs, axis=0).astype(np.float32)   # (S,1,H,W)
+    vol = np.stack(imgs, axis=0).astype(np.float32)  # (S,1,H,W)
     prv = np.stack(prevs, axis=0).astype(np.float32)  # (S,H,W)
-    msk = np.stack(masks, axis=0).astype(np.uint8)    # (S,H,W)
+    msk = np.stack(masks, axis=0).astype(np.uint8)  # (S,H,W)
 
     return {
         "tensor": torch.from_numpy(vol),

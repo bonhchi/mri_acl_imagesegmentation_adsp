@@ -1,9 +1,29 @@
 # log_iface.py — giao diện logger tối thiểu mà trainer gọi
 from typing import Protocol, Dict, Any
+
+
 class TrainLogger(Protocol):
-    def log_step(self, *, global_step:int, epoch:int, lr:float, loss:float)->None: ...
-    def log_epoch(self, *, epoch:int, time_s:float, train_loss:float,
-                  val_loss:float, val_dice:float, val_iou:float, lr:float)->None: ...
-    def log_best(self, *, epoch:int, key:float, ckpt_path:str)->None: ...
-    def log_meta(self, meta:Dict[str,Any])->None: ...
-    def close(self)->None: ...
+    def log_step(self, *, global_step: int, epoch: int, lr: float, loss: float) -> None:
+        ...
+
+    def log_epoch(
+        self,
+        *,
+        epoch: int,
+        time_s: float,
+        train_loss: float,
+        val_loss: float,
+        val_dice: float,
+        val_iou: float,
+        lr: float
+    ) -> None:
+        ...
+
+    def log_best(self, *, epoch: int, key: float, ckpt_path: str) -> None:
+        ...
+
+    def log_meta(self, meta: Dict[str, Any]) -> None:
+        ...
+
+    def close(self) -> None:
+        ...
