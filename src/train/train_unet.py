@@ -1,37 +1,36 @@
 # -*- coding: utf-8 -*-
 import os, json, argparse, numpy as np, torch
+from time import time
 from torch.utils.data import DataLoader
 from src.dataio.datasets import KneeNPZ2DSlices
 from src.models.unet_factory import build_unet
 from src.train.losses import build_loss
 from src.train.engine import train_one_epoch, validate, save_samples
 
+# chọn logger backend (noop/csv hoặc adapter riêng của bạn)
+from src.train.log_adapters import CSVLoggerAdapter, NoOpLogger
+def make_logger(kind, out_dir):
+    return CSVLoggerAdapter(out_dir) if kind=="csv" else NoOpLogger()
+
+
 def parse_args():
-    p = argparse.ArgumentParser("Train U-Net 2D/2.5D (SMP)")
-    p.add_argument("--train-list", type=str, required=True)
-    p.add_argument("--val-list", type=str, required=True)
-    p.add_argument("--out-dir", type=str, default="runs/unet2d")
-
+    p=argparse.ArgumentParser("Train U-Net 2D/2.5D")
     # data/model
-    p.add_argument("--k", type=int, default=1, help="2.5D stack size (odd). 1=2D")
-    p.add_argument("--aug", type=str, default="light", choices=["none","light","medium"])
-    p.add_argument("--model", type=str, default="unet", choices=["unet","unetpp"])
-    p.add_argument("--encoder", type=str, default="resnet34")
-    p.add_argument("--encoder-weights", type=str, default="none", help="imagenet|none")
-    p.add_argument("--classes", type=int, default=1)
-    p.add_argument("--imagenet-norm", action="store_true")
-
+    p.add_argument("--train-list",required=True); p.add_argument("--val-list",required=True)
+    p.add_argument("--out-dir",default="runs/unet2d")
+    p.add_argument("--k",type=int,default=1); p.add_argument("--aug",default="light",choices=["none","light","medium"])
+    p.add_argument("--model",default="unet",choices=["unet","unetpp"])
+    p.add_argument("--encoder",default="resnet34"); p.add_argument("--encoder-weights",default="none")
+    p.add_argument("--classes",type=int,default=1); p.add_argument("--imagenet-norm",action="store_true")
     # train
-    p.add_argument("--batch-size", type=int, default=12)
-    p.add_argument("--epochs", type=int, default=40)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--workers", type=int, default=4)
-    p.add_argument("--loss", type=str, default="dice_bce",
-                   choices=["dice_bce","focal","tversky","focal_tversky","dice_ce","ce"])
-    p.add_argument("--patience", type=int, default=10)
-    p.add_argument("--amp", action="store_true")
-    p.add_argument("--seed", type=int, default=2024)
+    p.add_argument("--batch-size",type=int,default=12); p.add_argument("--epochs",type=int,default=40)
+    p.add_argument("--lr",type=float,default=1e-3); p.add_argument("--weight-decay",type=float,default=1e-4)
+    p.add_argument("--workers",type=int,default=4); p.add_argument("--loss",default="dice_bce",
+              choices=["dice_bce","focal","tversky","focal_tversky","dice_ce","ce"])
+    p.add_argument("--amp",action="store_true"); p.add_argument("--seed",type=int,default=2024)
+    # logging/save
+    p.add_argument("--logger",default="csv",choices=["noop","csv"])
+    p.add_argument("--save-val-probs",action="store_true")
     return p.parse_args()
 
 def set_seed(s):
@@ -64,10 +63,9 @@ def main():
     sch = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=3)
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
 
-    best_key = -1.0
-    best_path = os.path.join(args.out_dir, "best.pt")
-    with open(os.path.join(args.out_dir, "train_log.csv"), "w") as f:
-        f.write("epoch,train_loss,val_loss,val_dice,val_iou,lr\n")
+       # 3) Train loop (log step/epoch, save best, sample grid)
+    best_key=-1.0; best_path=os.path.join(args.out_dir,"best.pt")
+    global_step=0; t0=time()
 
     for ep in range(1, args.epochs + 1):
         tr = train_one_epoch(model, train_ld, opt, scaler, device,
@@ -75,16 +73,30 @@ def main():
         vl, vd, vi = validate(model, val_ld, device,
                               {"amp": args.amp, "classes": args.classes}, loss_obj)
         sch.step(vl)
-        lr = opt.param_groups[0]["lr"]
-        print(f"Epoch {ep:03d}/{args.epochs} | train {tr:.4f} | val {vl:.4f} | dice {vd:.4f} | iou {vi:.4f} | lr {lr:.2e}")
-        with open(os.path.join(args.out_dir, "train_log.csv"), "a") as f:
-            f.write(f"{ep},{tr:.6f},{vl:.6f},{vd:.6f},{vi:.6f},{lr:.6e}\n")
+        lr = float(opt.param_groups[0]["lr"])
+        el = time() - t0
+        print(f"Epoch {ep:03d}/{args.epochs} | train {tr:.4f} | val {vl:.4f} | dice {vd:.4f} | iou {vi:.4f} | lr {lr:.2e} | {el:.1f}s")
+        logger.log_epoch(epoch=ep,time_s=el,train_loss=float(tr),val_loss=float(vl),
+                         val_dice=float(vd),val_iou=float(vi),lr=lr)
 
         key = vd if args.classes == 1 else -vl
         if key > best_key:
             best_key = key
             torch.save({"model": model.state_dict(), "args": vars(args)}, best_path)
-            print(f"  >> Saved best to {best_path}")
+            if args.save_val_probs:  # lưu probs của val để vẽ PR/ROC
+                model.eval(); Ps, Gs = [], []
+                with torch.no_grad():
+                    for x,y in val_ld:
+                        x=x.to(device)
+                        with torch.amp.autocast("cuda",enabled=args.amp):
+                            lo=model(x)
+                            if args.classes==1:
+                                p=torch.sigmoid(lo).cpu().numpy(); g=y.cpu().numpy(); g=g if g.ndim==4 else g[:,None,...]
+                            else:
+                                p=torch.softmax(lo,1).cpu().numpy(); g=y.cpu().numpy()
+                        Ps.append(p); Gs.append(g)
+                np.savez_compressed(os.path.join(args.out_dir,"val_preds.npz"),
+                                    probs=np.concatenate(Ps,0), gts=np.concatenate(Gs,0))
 
         if ep == 1 or ep % 5 == 0:
             save_samples(model, val_ld, device,
@@ -93,6 +105,12 @@ def main():
 
     save_samples(model, val_ld, device, {"amp": args.amp, "classes": args.classes},
                  args.out_dir, max_samples=12)
+    logger.log_meta({"best_ckpt":best_path,"epochs":args.epochs,"batch_size":args.batch_size,
+                     "lr_init":args.lr,"weight_decay":args.weight_decay,"scheduler":"ReduceLROnPlateau",
+                     "model":args.model,"encoder":args.encoder,"encoder_weights":args.encoder_weights,
+                     "classes":args.classes,"k_2p5d":args.k,"imagenet_norm":bool(args.imagenet_norm),
+                     "aug":args.aug,"seed":args.seed})
+    logger.close()
     print("Done. Best:", best_path)
 
 if __name__ == "__main__":
