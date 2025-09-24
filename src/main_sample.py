@@ -1,23 +1,3 @@
-# import torch
-
-# def main():
-#     print("Torch version:", torch.__version__)
-#     print("CUDA available:", torch.cuda.is_available())
-
-#     if torch.cuda.is_available():
-#         print("GPU name:", torch.cuda.get_device_name(0))
-#         print("CUDA version:", torch.version.cuda)
-        
-#         # test tính toán GPU
-#         x = torch.rand(10000, 10000, device="cuda")
-#         y = torch.rand(10000, 10000, device="cuda")
-#         z = torch.matmul(x, y)
-#         print("Matrix multiplication done on GPU, shape:", z.shape)
-#     else:
-#         print("⚠️ CUDA không khả dụng, đang chạy trên CPU")
-
-# if __name__ == "__main__":
-#     main()
 import os, json, argparse, pathlib
 from typing import List, Dict
 import numpy as np
@@ -41,6 +21,15 @@ try:
     from tqdm import tqdm
 except Exception:
     tqdm = lambda x, **k: x
+
+try:
+    from src.utils.seed import set_seed  # type: ignore
+except Exception:
+    def set_seed(*args, **kwargs): pass
+try:
+    from src.utils.logger import build_logger  # type: ignore
+except Exception:
+    def build_logger(*args, **kwargs): return None
 
 import imageio.v2 as iio
 
@@ -207,19 +196,22 @@ def parse_args_preprocess():
     return ap.parse_args()
 
 # def build_preprocess(name: str, args)
-#End Preprocess
+# End Preprocess
+
+# Training
+
+# End TrainS
+
 
 
 def main():
     args = parse_args_adapter()
-    ds = build_adapter(args.dataset, args)
+    ds, adapter = build_adapter(args.dataset, args)
     preview(ds, n=3)  # xem nhanh vài mẫu; train loop để file train/*.py xử lý
 
-    # Nếu muốn DataLoader tại đây (demo):
-    # from torch.utils.data import DataLoader
-    # dl = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0)
-    # batch = next(iter(dl))
-    # print("Got a batch of", len(batch))
+    pargs = parse_args_preprocess()
+    preprocess = build_preprocess(pargs, adapter=ds.adapter)
+    print(preprocess)
 
 
 if __name__ == "__main__":
