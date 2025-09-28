@@ -1,15 +1,9 @@
-import os, glob, h5py, numpy as np, torch
-from torch.utils.data import DataLoader, TensorDataset
+﻿from pathlib import Path
 
-from adapters.fastmri_singlecoil import FastMRISinglecoilAdapter
-from src.preprocess.mri_preprocess import MRIKneePreprocessor
-from src.models.unet_factory import build_unet
-from src.train.losses import LossManager
+import numpy as np
+import torch
 
-import os, glob, h5py, numpy as np, torch
-from torch.utils.data import DataLoader, TensorDataset
-
-from adapters.fastmri_singlecoil import FastMRISinglecoilAdapter
+from src.adapters.fastmri_adapter import FastMRISinglecoilAdapter
 from src.preprocess.mri_preprocess import MRIKneePreprocessor
 from src.models.unet_factory import build_unet
 from src.train.losses import LossManager
@@ -17,7 +11,9 @@ from src.train.losses import LossManager
 
 def main():
     # --- Adapter ---
-    adapter = FastMRISinglecoilAdapter(root_dir="/path/to/fastmri/data")
+    project_root = Path(__file__).resolve().parents[2]
+    singlecoil_root = project_root / "dataset" / "singlecoil_train"
+    adapter = FastMRISinglecoilAdapter(root_dir=str(singlecoil_root))
     records = adapter.discover_records(adapter.root_dir)
     sample = adapter.load_record(records[0])
 
