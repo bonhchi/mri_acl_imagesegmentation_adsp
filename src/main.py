@@ -1,15 +1,15 @@
-import os, json, argparse, pathlib
-from typing import List, Dict
+import os, json, argparse
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 from pprint import pprint
 
 # ---- adapters & dataset wrapper
 from adapters.fastmri_adapter import FastMRISinglecoilAdapter
-from adapters.oai_zib_adapter import OaiZibAdapter
-from adapters.kaggle_knee_pck_adapter import KaggleKneePckAdapter
+from adapters.base_adapter import BaseAdapter
 from datasets.trainer_dataset import TrainerDataset
-from src.preprocess.mri_preprocess import preprocess_records
+from src.preprocess.mri_preprocess import MRIKneePreprocessor, preprocess_records
 
 # (tùy) nếu bạn đã có preprocessor, import vào đây
 try:
@@ -34,56 +34,25 @@ except Exception:
 import imageio.v2 as iio
 
 #Adapter
-def build_adapter(name: str, args) -> TrainerDataset:
+def build_adapter(name: str, args) -> Tuple[TrainerDataset, BaseAdapter]:
     """
-    Tạo adapter + TrainerDataset theo tên dataset.
-    - Mặc định đọc root từ ENV; có thể override bằng --root.
+    FastMRI-only adapter factory used during the demo.
+    - Root is taken from FASTMRI_ROOT env or --root CLI override.
     """
-    name = name.lower()
+    if name.lower() != "fastmri":
+        raise ValueError("Demo only supports the fastMRI single-coil dataset.")
 
-    if name == "fastmri":
-        # root: ENV FASTMRI_ROOT hoặc --root
-        root = args.root or os.getenv("FASTMRI_ROOT")
-        if not root:
-            raise ValueError("Missing root for fastMRI. Set FASTMRI_ROOT or pass --root")
+    root = args.root or os.getenv("FASTMRI_ROOT")
+    if not root:
+        raise ValueError("Missing root for fastMRI. Set FASTMRI_ROOT or pass --root")
 
-        adapter = FastMRISinglecoilAdapter(root_dir=root)  # adapter đã đọc env trong __init__ nếu bạn cấu hình như trước
-        pre = None
-        if args.with_preproc and Preprocessor:
-            pre = Preprocessor(target_size=(320, 320), normalize="zscore")
-        return TrainerDataset(adapter, preprocessor=pre)
+    adapter = FastMRISinglecoilAdapter(root_dir=root)
+    pre = None
+    if args.with_preproc and Preprocessor:
+        pre = Preprocessor(target_size=(320, 320), normalize="zscore")
+    dataset = TrainerDataset(adapter, preprocessor=pre)
+    return dataset, adapter
 
-    elif name == "oai":
-        # 2 cách: dùng index npz (ENV OAI_ZIB_INDEX_NPZ) hoặc pattern glob (ENV OAI_ZIB_IMG_GLOB / OAI_ZIB_MSK_GLOB)
-        index_npz = args.index or os.getenv("OAI_ZIB_INDEX_NPZ")
-        if index_npz:
-            adapter = OaiZibAdapter(index_npz=index_npz, slice_axis=args.slice_axis)
-        else:
-            img_glob = args.img_glob or os.getenv("OAI_ZIB_IMG_GLOB")
-            msk_glob = args.msk_glob or os.getenv("OAI_ZIB_MSK_GLOB")
-            if not (img_glob and msk_glob):
-                raise ValueError("OAI-ZIB needs --img-glob & --mask-glob or set env OAI_ZIB_IMG_GLOB/OAI_ZIB_MSK_GLOB")
-            adapter = OaiZibAdapter(image_glob=img_glob, mask_glob=msk_glob, slice_axis=args.slice_axis)
-
-        pre = None
-        if args.with_preproc and Preprocessor:
-            pre = Preprocessor(target_size=(320, 320), normalize="zscore")
-        return TrainerDataset(adapter, preprocessor=pre)
-
-    elif name in ("kaggle", "kneepck", "kneemri"):
-        # root: ENV KAGGLE_KNEE_PCK_ROOT hoặc --root
-        root = args.root or os.getenv("KAGGLE_KNEE_PCK_ROOT")
-        if not root:
-            raise ValueError("Missing root for Kaggle .pck. Set KAGGLE_KNEE_PCK_ROOT or pass --root")
-
-        adapter = KaggleKneePckAdapter()
-        pre = None
-        if args.with_preproc and Preprocessor:
-            pre = Preprocessor(target_size=(256, 256), normalize="minmax")  # ví dụ khác fastMRI
-        return TrainerDataset(adapter, root_dir=root, preprocessor=pre)
-
-    else:
-        raise ValueError(f"Unknown dataset name: {name}")
 
 
 def preview(ds, n=3):
@@ -101,18 +70,14 @@ def preview(ds, n=3):
         pprint({k: v for k, v in meta.items() if k not in ("adapter",)})
 
 
-def parse_args_adapter():
-    p = argparse.ArgumentParser(description="Adapter demo entrypoint")
-    p.add_argument("--dataset", required=True, choices=["fastmri", "oai", "kaggle"],
-                   help="Chọn adapter: fastmri | oai | kaggle")
-    p.add_argument("--root", default=None, help="Override root dir (ưu tiên hơn ENV)")
+def parse_args_adapter(argv: Optional[Sequence[str]] = None):
+    p = argparse.ArgumentParser(description="Adapter demo entrypoint (fastMRI only)")
+    p.add_argument("--dataset", required=True, choices=["fastmri"],
+                   help="Chỉ hỗ trợ fastMRI single-coil")
+    p.add_argument("--root", default=None, help="Override root dir (ưu tiên hơn FASTMRI_ROOT)")
     p.add_argument("--with-preproc", action="store_true", help="Gắn preprocessor nếu module có")
-    # OAI-ZIB options
-    p.add_argument("--index", default=None, help="Path tới index .npz (nếu dùng)")
-    p.add_argument("--img-glob", default=None, help="Glob ảnh NIfTI (nếu không dùng index)")
-    p.add_argument("--mask-glob", default=None, help="Glob mask NIfTI (nếu không dùng index)")
-    p.add_argument("--slice-axis", type=int, default=2, help="Trục cắt slice cho OAI-ZIB (0/1/2)")
-    return p.parse_args()
+    args, remaining = p.parse_known_args(argv)
+    return args, remaining
 
 #End Adapter
 
@@ -177,7 +142,9 @@ def save_pack(out_dir: str, pack: Dict, preview_max: int = 8):
     with open(os.path.join(out_dir, "stats.json"), "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
 
-def parse_args_preprocess():
+def parse_args_preprocess(argv: Optional[Sequence[str]] = None):
+    if not argv:
+        return None
     ap = argparse.ArgumentParser(
         description="Preprocess fastMRI knee (single-coil) → tensor/preview/meta"
     )
@@ -193,9 +160,53 @@ def parse_args_preprocess():
                     help="Percentile clip, ví dụ '1.0,99.5'")
     ap.add_argument("--preview_max", type=int, default=8,
                     help="Số preview PNG mỗi volume")
-    return ap.parse_args()
+    return ap.parse_args(argv)
 
-# def build_preprocess(name: str, args)
+
+def _parse_pair(value: str, name: str) -> Tuple[float, float]:
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    if len(parts) != 2:
+        raise ValueError(f"{name} phải ở dạng 'lo,hi'")
+    try:
+        lo, hi = map(float, parts)
+    except ValueError as exc:
+        raise ValueError(f"{name} phải gồm 2 số thực, nhận {value!r}") from exc
+    return lo, hi
+
+def build_preprocess(args, adapter: BaseAdapter):
+    """Run MRI preprocessing for all volumes discovered by the adapter."""
+    slice_keep = _parse_pair(args.slice_keep, "slice_keep")
+    clip = _parse_pair(args.clip, "clip")
+    preprocessor = MRIKneePreprocessor(
+        out_size=(args.height, args.width),
+        slice_keep=slice_keep,
+        clip_percentiles=clip,
+        use_n4=args.use_n4,
+        use_denoise=args.use_denoise,
+    )
+    out_root = Path(args.out_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
+    try:
+        records = adapter.discover_records(args.root_dir)
+    except TypeError:
+        records = adapter.discover_records()
+    if not records:
+        return []
+    grouped = group_records_by_file(records)
+    volume_items = list(grouped.items())
+    summary = []
+    for filepath, record_defs in tqdm(volume_items, desc="Preprocess volumes"):
+        loaded = [adapter.load_record(rec) for rec in record_defs]
+        pack = preprocess_records(loaded, preprocessor=preprocessor)
+        out_dir = out_root / Path(filepath).stem
+        save_pack(str(out_dir), pack, preview_max=args.preview_max)
+        summary.append({
+            "filepath": filepath,
+            "output_dir": str(out_dir),
+            "num_slices": int(pack["tensor"].shape[0]),
+        })
+    return summary
+
 # End Preprocess
 
 # Training
@@ -205,15 +216,26 @@ def parse_args_preprocess():
 
 
 def main():
-    args = parse_args_adapter()
-    ds, adapter = build_adapter(args.dataset, args)
-    preview(ds, n=3)  # xem nhanh vài mẫu; train loop để file train/*.py xử lý
-
-    pargs = parse_args_preprocess()
-    preprocess = build_preprocess(pargs, adapter=ds.adapter)
-    print(preprocess)
-
-
+    """Pipeline demo cho fastMRI: adapter preview -> preprocess artefact."""
+def main():
+    """FastMRI demo pipeline: adapter preview -> preprocessing artefacts."""
+    # Step 1: parse adapter arguments (fastMRI only) and build the dataset wrapper
+    adapter_args, remaining = parse_args_adapter()
+    dataset, adapter = build_adapter(adapter_args.dataset, adapter_args)
+    # Step 2: preview a few slices to sanity-check the adapter output
+    preview(dataset, n=3)
+    # Step 3: parse preprocessing arguments (if extra CLI flags were provided)
+    preprocess_args = parse_args_preprocess(remaining)
+    if preprocess_args is None:
+        # No preprocessing args -> stop after preview
+        return
+    # Step 4: run preprocessing and persist tensor/preview/meta artefacts
+    results = build_preprocess(preprocess_args, adapter=adapter)
+    if not results:
+        print("No volume matched the preprocessing filters.")
+        return
+    print(f"Preprocess finished for {len(results)} volume(s), stored at {preprocess_args.out_dir}")
+    # Follow up: run src/train/train_unet.py to train and collect experiment metrics
 if __name__ == "__main__":
     main()
 

@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import os, json, argparse, numpy as np, torch
+import json, argparse, numpy as np, torch
 from time import time
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, Tuple
+from pathlib import Path
 from torch.utils.data import DataLoader
 
 from src.dataio.datasets import KneeNPZ2DSlices
@@ -15,16 +16,8 @@ try:
     from src.train.losses import LossManager as _LossManager
     def _build_loss(classes: int, name: str):
         return _LossManager(classes=classes, name=name)
-    def _compute_loss(loss_obj, logits, targets):
-        return loss_obj(logits, targets)
 except Exception:
     from src.train.losses import build_loss as _build_loss
-    def _compute_loss(loss_obj, logits, targets):
-        # nn.ModuleList hay single module đều ok
-        import torch.nn as nn
-        if isinstance(loss_obj, nn.ModuleList):
-            return 0.5 * loss_obj[0](logits, targets) + 0.5 * loss_obj[1](logits, targets)
-        return loss_obj(logits, targets)
 
 # Logger adapters bạn đã có
 from src.train.log_adapters import CSVLoggerAdapter, NoOpLogger
@@ -113,68 +106,32 @@ def parse_args() -> UNet2DArgs:
 
 class UNet2DTrainer:
     """
-    Runner tổng cho training U-Net 2D/2.5D:
-      - chuẩn bị DataLoader từ KneeNPZ2DSlices
-      - build model (SMP), loss, optimizer, scheduler, scaler
-      - sử dụng Engine (class) để train/validate/save_samples
-      - lưu best checkpoint và (tuỳ chọn) probs của val
+    Runner for U-Net 2D/2.5D training:
+      - Prepare DataLoader from KneeNPZ2DSlices
+      - Build model (SMP), loss, optimizer, scheduler, scaler
+      - Use Engine to train/validate/save_samples
+      - Persist the best checkpoint and optional val probabilities
     """
 
     def __init__(self, args: UNet2DArgs):
         self.args = args
         set_seed(args.seed)
-        os.makedirs(args.out_dir, exist_ok=True)
-        with open(os.path.join(args.out_dir, "args.json"), "w") as f:
-            json.dump(asdict(args), f, indent=2)
+        self.out_dir = Path(args.out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self._dump_config()
 
-        # --- datasets / loaders ---
-        self.train_ds = KneeNPZ2DSlices(
-            args.train_list,
-            k=args.k, aug=args.aug,
-            imagenet_norm=args.imagenet_norm,
-            encoder_name=args.encoder,
-        )
-        self.val_ds = KneeNPZ2DSlices(
-            args.val_list,
-            k=args.k, aug="none",
-            imagenet_norm=args.imagenet_norm,
-            encoder_name=args.encoder,
-        )
-        self.train_ld = DataLoader(
-            self.train_ds, batch_size=args.batch_size, shuffle=True,
-            num_workers=args.workers, pin_memory=True, drop_last=True,
-        )
-        self.val_ld = DataLoader(
-            self.val_ds, batch_size=max(1, args.batch_size // 2), shuffle=False,
-            num_workers=args.workers, pin_memory=True,
-        )
-
-        # --- model ---
-        in_ch = 3 if (args.imagenet_norm and args.k == 1) else args.k
-        self.model = build_unet(
-            args.model, args.encoder, args.encoder_weights,
-            in_ch=in_ch, classes=args.classes,
-        )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.to(self.device)
 
-        # --- loss / optimizer / scheduler / scaler ---
-        self.loss_obj = _build_loss(args.classes, args.loss)
-        # LossManager trả nn.Module callable; build_loss cũ trả nn.ModuleList/nn.Module — đều tương thích với Engine qua compute_loss nội bộ
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode="min", factor=0.5, patience=3)
-        self.scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
+        self._build_dataloaders()
+        self._build_model()
+        self._build_optimization_stack()
 
-        # --- logger ---
-        self.logger = make_logger(args.logger, args.out_dir)
-
-        # --- engine ---
-        # cấu hình tối thiểu cho Engine
+        self.logger = make_logger(args.logger, str(self.out_dir))
         self.cfg: Dict[str, Any] = {
             "amp": bool(args.amp),
             "classes": int(args.classes),
             "max_grad_norm": float(getattr(args, "max_grad_norm", 5.0)),
-            "out_dir": args.out_dir,
+            "out_dir": str(self.out_dir),
             "epochs": args.epochs,
             "save_best": True,
         }
@@ -188,112 +145,205 @@ class UNet2DTrainer:
             scaler=self.scaler,
         )
 
-        # best tracking
-        self.best_key: float = -1.0
-        self.best_ckpt_path: str = os.path.join(args.out_dir, "best.pt")
+        self.best_metric = float("-inf")
+        self.best_ckpt_path = self.out_dir / "best.pt"
+        self.best_snapshot: Dict[str, Any] = {}
 
-    def _save_best(self):
-        os.makedirs(os.path.join(self.args.out_dir, "checkpoints"), exist_ok=True)
-        # chấp nhận cả state_dict tối giản (như Engine.fit) hoặc gói thông tin
+    def _dump_config(self) -> None:
+        with (self.out_dir / "args.json").open("w", encoding="utf-8") as f:
+            json.dump(asdict(self.args), f, indent=2)
+
+    def _build_dataloaders(self) -> None:
+        common = dict(
+            k=self.args.k,
+            imagenet_norm=self.args.imagenet_norm,
+            encoder_name=self.args.encoder,
+        )
+        self.train_ds = KneeNPZ2DSlices(self.args.train_list, aug=self.args.aug, **common)
+        self.val_ds = KneeNPZ2DSlices(self.args.val_list, aug="none", **common)
+        self.train_ld = DataLoader(
+            self.train_ds,
+            batch_size=self.args.batch_size,
+            shuffle=True,
+            num_workers=self.args.workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+        self.val_ld = DataLoader(
+            self.val_ds,
+            batch_size=max(1, self.args.batch_size // 2),
+            shuffle=False,
+            num_workers=self.args.workers,
+            pin_memory=True,
+        )
+
+    def _determine_in_channels(self) -> int:
+        if self.args.k == 1 and self.args.imagenet_norm:
+            return 3
+        return self.args.k
+
+    def _build_model(self) -> None:
+        in_ch = self._determine_in_channels()
+        self.model = build_unet(
+            self.args.model,
+            self.args.encoder,
+            self.args.encoder_weights,
+            in_ch=in_ch,
+            classes=self.args.classes,
+        )
+        self.model.to(self.device)
+
+    def _build_optimization_stack(self) -> None:
+        self.loss_obj = _build_loss(self.args.classes, self.args.loss)
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.args.lr,
+            weight_decay=self.args.weight_decay,
+        )
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode="min",
+            factor=0.5,
+            patience=3,
+        )
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.args.amp)
+
+    def _record_best(self, epoch: int, train_loss: float, val_loss: float, val_dice: float, val_iou: float, lr: float) -> None:
+        self.best_snapshot = {
+            "epoch": int(epoch),
+            "train_loss": float(train_loss),
+            "val_loss": float(val_loss),
+            "val_dice": float(val_dice),
+            "val_iou": float(val_iou),
+            "lr": float(lr),
+        }
+
+    def _metric_key(self, val_loss: float, val_dice: float) -> float:
+        return val_dice if self.args.classes == 1 else -val_loss
+
+    def _save_best(self) -> None:
+        ckpt_dir = self.out_dir / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
         torch.save({"model": self.model.state_dict(), "args": asdict(self.args)}, self.best_ckpt_path)
 
-    def _save_val_probs_if_needed(self):
+    def _save_val_probs_if_needed(self) -> None:
         if not self.args.save_val_probs:
             return
         self.model.eval()
-        Ps, Gs = [], []
+        probs_list, gt_list = [], []
         with torch.no_grad():
             for x, y in self.val_ld:
                 x = x.to(self.device)
                 with torch.amp.autocast("cuda", enabled=self.args.amp):
-                    lo = self.model(x)
+                    logits = self.model(x)
                     if self.args.classes == 1:
-                        p = torch.sigmoid(lo).cpu().numpy()
-                        g = y.cpu().numpy()
-                        g = g if g.ndim == 4 else g[:, None, ...]
+                        probs = torch.sigmoid(logits).cpu().numpy()
+                        gts = y.cpu().numpy()
+                        gts = gts if gts.ndim == 4 else gts[:, None, ...]
                     else:
-                        p = torch.softmax(lo, 1).cpu().numpy()
-                        g = y.cpu().numpy()
-                Ps.append(p); Gs.append(g)
+                        probs = torch.softmax(logits, 1).cpu().numpy()
+                        gts = y.cpu().numpy()
+                probs_list.append(probs)
+                gt_list.append(gts)
         np.savez_compressed(
-            os.path.join(self.args.out_dir, "val_preds.npz"),
-            probs=np.concatenate(Ps, 0),
-            gts=np.concatenate(Gs, 0),
+            self.out_dir / "val_preds.npz",
+            probs=np.concatenate(probs_list, 0),
+            gts=np.concatenate(gt_list, 0),
         )
 
     def run(self) -> Dict[str, Any]:
-        """
-        Chạy full training loop (giống main cũ) và trả thông tin kết quả.
-        """
+        """Ch?y full training loop v? tr? th?ng tin k?t qu?."""
         t0 = time()
-        best_metric = -1.0  # vd Dice nếu binary, còn multiclass dùng -val_loss
         history = []
 
         for ep in range(1, self.args.epochs + 1):
             self.cfg["epoch"] = ep
 
-            # --- train / val ---
-            tr_loss = self.engine.train_one_epoch(self.train_ld)
+            train_loss = self.engine.train_one_epoch(self.train_ld)
             val_loss, val_dice, val_iou = self.engine.validate(self.val_ld)
 
-            # --- sched theo val_loss (như code gốc) ---
             self.scheduler.step(val_loss)
             lr = float(self.optimizer.param_groups[0]["lr"])
-            el = time() - t0
+            elapsed = time() - t0
 
-            # --- console log ---
-            print(f"Epoch {ep:03d}/{self.args.epochs} | "
-                  f"train {tr_loss:.4f} | val {val_loss:.4f} | "
-                  f"dice {val_dice:.4f} | iou {val_iou:.4f} | lr {lr:.2e} | {el:.1f}s")
+            print(
+                f"Epoch {ep:03d}/{self.args.epochs} | "
+                f"train {train_loss:.4f} | val {val_loss:.4f} | "
+                f"dice {val_dice:.4f} | iou {val_iou:.4f} | lr {lr:.2e} | {elapsed:.1f}s"
+            )
 
-            # --- logger epoch ---
             if hasattr(self.logger, "log_epoch"):
                 self.logger.log_epoch(
-                    epoch=ep, time_s=el,
-                    train_loss=float(tr_loss), val_loss=float(val_loss),
-                    val_dice=float(val_dice), val_iou=float(val_iou), lr=lr,
+                    epoch=ep,
+                    time_s=elapsed,
+                    train_loss=float(train_loss),
+                    val_loss=float(val_loss),
+                    val_dice=float(val_dice),
+                    val_iou=float(val_iou),
+                    lr=lr,
                 )
-            history.append({"epoch": ep, "train_loss": float(tr_loss),
-                            "val_loss": float(val_loss), "val_dice": float(val_dice),
-                            "val_iou": float(val_iou), "lr": lr})
+            history.append(
+                {
+                    "epoch": ep,
+                    "train_loss": float(train_loss),
+                    "val_loss": float(val_loss),
+                    "val_dice": float(val_dice),
+                    "val_iou": float(val_iou),
+                    "lr": lr,
+                }
+            )
 
-            # --- chọn best ---
-            key = val_dice if self.args.classes == 1 else -val_loss
-            if key > best_metric:
-                best_metric = key
+            metric_key = self._metric_key(val_loss, val_dice)
+            if metric_key > self.best_metric:
+                self.best_metric = metric_key
+                self._record_best(ep, train_loss, val_loss, val_dice, val_iou, lr)
                 self._save_best()
                 self._save_val_probs_if_needed()
 
-            # --- lưu samples định kỳ ---
             if ep == 1 or ep % 5 == 0:
-                self.engine.save_samples(self.val_ld, self.args.out_dir, max_samples=6)
+                self.engine.save_samples(self.val_ld, str(self.out_dir), max_samples=6)
 
-        # save thêm samples cuối
-        self.engine.save_samples(self.val_ld, self.args.out_dir, max_samples=12)
+        final_snapshot = history[-1] if history else {}
+        if self.best_snapshot:
+            summary = {
+                "best": self.best_snapshot,
+                "final": final_snapshot,
+                "best_ckpt": str(self.best_ckpt_path),
+                "epochs": int(self.args.epochs),
+            }
+        else:
+            summary = {
+                "best": {},
+                "final": final_snapshot,
+                "best_ckpt": str(self.best_ckpt_path),
+                "epochs": int(self.args.epochs),
+            }
+        with (self.out_dir / "history.json").open("w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+        with (self.out_dir / "summary.json").open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
 
-        # meta log & close
         if hasattr(self.logger, "log_meta"):
-            self.logger.log_meta({
-                "best_ckpt": self.best_ckpt_path,
-                "epochs": self.args.epochs,
-                "batch_size": self.args.batch_size,
-                "lr_init": self.args.lr,
-                "weight_decay": self.args.weight_decay,
-                "scheduler": "ReduceLROnPlateau",
-                "model": self.args.model,
-                "encoder": self.args.encoder,
-                "encoder_weights": self.args.encoder_weights,
-                "classes": self.args.classes,
-                "k_2p5d": self.args.k,
-                "imagenet_norm": bool(self.args.imagenet_norm),
-                "aug": self.args.aug,
-                "seed": self.args.seed,
-            })
+            self.logger.log_meta(
+                {
+                    "best_ckpt": str(self.best_ckpt_path),
+                    "epochs": self.args.epochs,
+                    "batch_size": self.args.batch_size,
+                    "lr_init": self.args.lr,
+                    "weight_decay": self.args.weight_decay,
+                    "scheduler": "ReduceLROnPlateau",
+                    "model": self.args.model,
+                    "encoder": self.args.encoder,
+                    "encoder_weights": self.args.encoder_weights,
+                    "classes": self.args.classes,
+                    "k_2p5d": self.args.k,
+                    "imagenet_norm": bool(self.args.imagenet_norm),
+                    "aug": self.args.aug,
+                    "seed": self.args.seed,
+                }
+            )
         if hasattr(self.logger, "close"):
             self.logger.close()
 
         print("Done. Best ckpt:", self.best_ckpt_path)
-        return {
-            "best_ckpt": self.best_ckpt_path,
-            "history": history,
-        }
+        return {"best_ckpt": str(self.best_ckpt_path), "history": history, "summary": summary}

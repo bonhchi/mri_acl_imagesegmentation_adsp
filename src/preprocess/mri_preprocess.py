@@ -271,3 +271,26 @@ class MRIKneePreprocessor:
                 raise ValueError("kspace không phải complex. Hãy ghép (real,imag) -> complex trước khi preprocess.")
         ksp = MRIKneePreprocessor._ensure_2d(ksp, "kspace")
         return ksp, "kspace", meta
+
+
+# --------- convenience API ----------
+def _resolve_preprocessor(preprocessor=None, **kwargs):
+    """Return an existing preprocessor or build a new one from kwargs."""
+    if preprocessor is not None and kwargs:
+        raise ValueError('Provide either an existing preprocessor or keyword overrides, not both.')
+    return preprocessor or MRIKneePreprocessor(**kwargs)
+
+
+def preprocess_record(record, *, preprocessor=None, **kwargs):
+    """Convenience wrapper around MRIKneePreprocessor.preprocess_record."""
+    pre = _resolve_preprocessor(preprocessor, **kwargs)
+    return pre.preprocess_record(record)
+
+
+def preprocess_records(records, *, preprocessor=None, **kwargs):
+    """Convenience wrapper around MRIKneePreprocessor.preprocess_records."""
+    pre = _resolve_preprocessor(preprocessor, **kwargs)
+    return pre.preprocess_records(records)
+
+
+__all__ = ['MRIKneePreprocessor', 'preprocess_record', 'preprocess_records']
