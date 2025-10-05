@@ -1,0 +1,16 @@
+{
+  "best_ckpt": "D:\\Master\\ImageSegmentation\\Demo\\runs\\fastmri_unet\\best.pt",
+  "epochs": 20,
+  "batch_size": 8,
+  "lr_init": 0.001,
+  "weight_decay": 0.0001,
+  "scheduler": "ReduceLROnPlateau",
+  "model": "unet",
+  "encoder": "resnet34",
+  "encoder_weights": "none",
+  "classes": 1,
+  "k_2p5d": 1,
+  "imagenet_norm": false,
+  "aug": "light",
+  "seed": 2024
+}

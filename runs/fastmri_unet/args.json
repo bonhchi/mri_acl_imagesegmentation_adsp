@@ -1,0 +1,23 @@
+{
+  "train_list": "D:\\Master\\ImageSegmentation\\Demo\\lists\\train.txt",
+  "val_list": "D:\\Master\\ImageSegmentation\\Demo\\lists\\val.txt",
+  "out_dir": "D:\\Master\\ImageSegmentation\\Demo\\runs\\fastmri_unet",
+  "k": 1,
+  "aug": "light",
+  "model": "unet",
+  "encoder": "resnet34",
+  "encoder_weights": "none",
+  "classes": 1,
+  "imagenet_norm": false,
+  "batch_size": 8,
+  "epochs": 20,
+  "lr": 0.001,
+  "weight_decay": 0.0001,
+  "workers": 4,
+  "loss": "dice_bce",
+  "amp": true,
+  "seed": 2024,
+  "logger": "csv",
+  "save_val_probs": false,
+  "max_grad_norm": 5.0
+}

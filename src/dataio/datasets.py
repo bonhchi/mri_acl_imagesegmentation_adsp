@@ -98,21 +98,36 @@ class KneeNPZ2DSlices(Dataset):
 
         # Albumentations expects HWC
         x_hwc = np.moveaxis(x, 0, -1)  # CHW -> HWC
+        y_np = y.copy()  # Sao luu mask dang numpy de xu ly
         if self.aug is not None:
-            out = self.aug(image=x_hwc, mask=y)
-            x_hwc, y = out["image"].numpy(), out["mask"].numpy()
-        x = np.moveaxis(x_hwc, -1, 0)            # back to CHW
-
-        x = torch.from_numpy(x.copy())
-        if y.max() <= 1:
-            y = torch.from_numpy(y.copy()).unsqueeze(0).float()   # (1,H,W) for binary
+            # Dung albumentations (tra ve tensor CHW) de cai thien mask
+            out = self.aug(image=x_hwc, mask=y_np)
+            img_aug, msk_aug = out["image"], out["mask"]
+            if isinstance(img_aug, torch.Tensor):
+                # Khi ToTensorV2 tra ve torch tensor -> giu nguyen kich thuoc CHW
+                x_tensor = img_aug.float()
+            else:
+                # Neu pipeline khong dung ToTensorV2 thi can chuyen nguoc HWC -> CHW
+                x_tensor = torch.from_numpy(np.moveaxis(img_aug, -1, 0).copy()).float()
+            if isinstance(msk_aug, torch.Tensor):
+                y_np = msk_aug.cpu().numpy()
+            else:
+                y_np = np.asarray(msk_aug)
         else:
-            y = torch.from_numpy(y.copy()).long()                 # (H,W) for multiclass
+            # Khong augment -> giu tensor CHW goc
+            x_tensor = torch.from_numpy(x.copy()).float()
+        y_np = np.ascontiguousarray(y_np)  # Dam bao bo nho lien tuc truoc khi tao tensor
 
-        # ImageNet normalize (và replicate nếu cần)
-        if self.imagenet_norm and x.shape[0] == 1:
-            x = x.repeat(3, 1, 1)
-        if self.imagenet_norm:
-            x = (x - self.mean) / self.std
+        # Tach hai truong hop nhi phan va da lop de dinh dang mask dung y
+        if y_np.max() <= 1:
+            y_tensor = torch.from_numpy(y_np.copy()).unsqueeze(0).float()   # (1,H,W) cho nhi phan
+        else:
+            y_tensor = torch.from_numpy(y_np.copy()).long()                 # (H,W) cho da lop
 
-        return x, y
+        # Xu ly rieng truong hop encoder ImageNet can 3 kenh dau vao
+        if self.imagenet_norm and x_tensor.shape[0] == 1:
+            x_tensor = x_tensor.repeat(3, 1, 1)
+        if self.imagenet_norm:  # Chuan hoa tensor theo thong so encoder
+            x_tensor = (x_tensor - self.mean) / self.std
+
+        return x_tensor.contiguous(), y_tensor  # Tra ve tensor da sap xep dung thu tu CHW

@@ -1,6 +1,6 @@
-# 🧠 Image Segmentation MRI – FastMRI Pipeline (RTX 3060 + Python 3.13)
+# Image Segmentation MRI – FastMRI Pipeline (RTX 3060 + Python 3.13)
 
-## 1️⃣ Chuẩn bị môi trường
+## Chuẩn bị môi trường
 cd /d D:\Master\ImageSegmentation\Demo
 
 python -m venv .venv
@@ -9,11 +9,11 @@ call .venv\Scripts\activate
 python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 
-⚠️ Nếu báo thiếu thư viện dotenv → cài thêm:
+Nếu báo thiếu thư viện dotenv → cài thêm:
 pip install python-dotenv
 
 
-## 2️⃣ Kiểm tra dữ liệu fastMRI
+## Kiểm tra dữ liệu fastMRI
 Dữ liệu `.h5` nằm trong:
 D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train
 
@@ -22,10 +22,10 @@ dir /s /b D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train\*.h5
 
 Nếu có file `.h5` → chạy lệnh sau để thử adapter:
 python -m src.main --dataset fastmri --root "D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train"
-✅ Nếu thấy “Dataset size: …” nghĩa là đọc được dữ liệu.
+Nếu thấy “Dataset size: …” nghĩa là đọc được dữ liệu.
 
 
-## 3️⃣ Preprocess thành volume (.npz / .pt)
+## Preprocess thành volume (.npz / .pt)
 python -m src.main ^
   --dataset fastmri ^
   --root "D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train" ^
@@ -59,7 +59,7 @@ print("Train:",k," Val:",len(L)-k)
 EOF
 
 
-## 5️⃣ Train U-Net (2D/2.5D)
+## Train U-Net (2D/2.5D)
 python -m src.train.train_unet ^
   --train-list lists\train.txt ^
   --val-list lists\val.txt ^
@@ -78,7 +78,7 @@ runs\fastmri_unet\history.csv
 runs\fastmri_unet\samples_epXX\
 
 
-## 6️⃣ Theo dõi bằng TensorBoard
+## Theo dõi bằng TensorBoard
 tensorboard --logdir runs\fastmri_unet
 → Mở http://localhost:6006
 
@@ -87,7 +87,7 @@ tensorboard --logdir runs\fastmri_unet
 python -m src.infer --ckpt runs\fastmri_unet\best.ckpt
 
 
-## 🧩 Ghi chú thêm
+## Ghi chú thêm
 | Thành phần | Ý nghĩa |
 |-------------|----------|
 | .env | Khai báo đường dẫn dataset (FASTMRI_ROOT, KNEE_MRI_ROOT, …) |
@@ -97,7 +97,7 @@ python -m src.infer --ckpt runs\fastmri_unet\best.ckpt
 | src/ | Mã nguồn chính (adapter, train, infer, utils, …) |
 
 
-## ✅ Kiểm tra nhanh GPU và môi trường
+## Kiểm tra nhanh GPU và môi trường
 python - <<EOF
 import torch, monai
 print("Torch:", torch.__version__, "CUDA available:", torch.cuda.is_available())

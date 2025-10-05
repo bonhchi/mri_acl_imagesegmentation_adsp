@@ -9,7 +9,7 @@ __pycache__/
 .env
 *.egg-info/
 
-# Data (không push lên git)
+# Data (khA'ng push lA?n git)
 dataset/
 outputs/
 *.nii
@@ -36,3 +36,7 @@ artifacts/**/*.npz
 artifacts/**/*.npy
 artifacts/**/*.json
 artifacts/**/*.png
+
+# Train/val list tu dong sinh
+lists/train.txt
+lists/val.txt
