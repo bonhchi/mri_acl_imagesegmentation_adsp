@@ -6,10 +6,10 @@ import torch
 from pprint import pprint
 
 # ---- adapters & dataset wrapper
-from adapters.fastmri_adapter import FastMRISinglecoilAdapter
-from adapters.base_adapter import BaseAdapter
-from datasets.trainer_dataset import TrainerDataset
-from src.preprocess.mri_preprocess import MRIKneePreprocessor, preprocess_records
+from .adapters.fastmri_adapter import FastMRISinglecoilAdapter
+from .adapters.base_adapter import BaseAdapter
+from .datasets.trainer_dataset import TrainerDataset
+from .preprocess.mri_preprocess import MRIKneePreprocessor, preprocess_records
 
 # (tùy) nếu bạn đã có preprocessor, import vào đây
 try:
@@ -104,6 +104,12 @@ def save_pack(out_dir: str, pack: Dict, preview_max: int = 8):
     # 1) tensor cho huấn luyện
     tensor: torch.Tensor = pack["tensor"]            # (S,1,H,W)
     torch.save(tensor, os.path.join(out_dir, "tensor.pt"))
+    volume_np = tensor.detach().cpu().numpy()
+    np.savez_compressed(
+        os.path.join(out_dir, "volume.npz"),
+        img=volume_np.astype(np.float32, copy=False),
+        msk=pack["mask"].astype(np.uint8, copy=False),
+    )
 
     # 2) mask, indices, metas
     np.save(os.path.join(out_dir, "mask.npy"), pack["mask"])  # (S,H,W)
@@ -203,6 +209,7 @@ def build_preprocess(args, adapter: BaseAdapter):
         summary.append({
             "filepath": filepath,
             "output_dir": str(out_dir),
+            "npz_path": str(out_dir / "volume.npz"),
             "num_slices": int(pack["tensor"].shape[0]),
         })
     return summary

@@ -4,13 +4,17 @@ from .base_adapter import BaseAdapter
 class FastMRISinglecoilAdapter(BaseAdapter):
     def __init__(self, root_dir=None, env_key="FASTMRI_ROOT"):
         # Nếu không truyền root_dir thì lấy từ biến môi trường
-        self.root_dir = root_dir or os.getenv(env_key)
-        if not self.root_dir:
+        resolved = root_dir or os.getenv(env_key)
+        if not resolved:
             raise ValueError(f"Must provide root_dir or set env {env_key}")
-        
-    def discover_records(self, root_dir):
+        super().__init__(resolved)
+
+    def discover_records(self, root_dir=None):
         records = []
-        files = sorted(glob.glob(os.path.join(root_dir, "*.h5")))
+        root = root_dir or self.root_dir
+        if not root:
+            raise ValueError("Missing root directory for fastMRI adapter")
+        files = sorted(glob.glob(os.path.join(root, "*.h5")))
         for fp in files:
             with h5py.File(fp, "r") as hf:
                 num_slices = hf["kspace"].shape[0]

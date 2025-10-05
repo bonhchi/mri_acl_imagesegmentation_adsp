@@ -2,19 +2,33 @@
 import os
 from dotenv import load_dotenv
 
-# load .env (tìm từ project root)
+# Load environment variables from a .env file located near the project root.
 load_dotenv()
 
-FASTMRI_ROOT = os.getenv("FASTMRI_ROOT")
-OAI_ZIB_ROOT = os.getenv("OAI_ZIB_ROOT")
-KAGGLE_KNEE_PCK_ROOT = os.getenv("KAGGLE_KNEE_PCK_ROOT")
+ENV_KEYS = [
+    "FASTMRI_ROOT",
+    "OAI_ZIB_ROOT",
+    "KAGGLE_KNEE_PCK_ROOT",
+    "KNEE_MRI_ROOT",
+    "SKM_TEA_MAIN_ROOT",
+]
 
-# check & cảnh báo nếu thiếu
-if not FASTMRI_ROOT:
-    print("[WARN] FASTMRI_ROOT is not set in .env or environment")
-if not OAI_ZIB_FRAMELAST_ROOT:
-    print("[WARN] OAI_ZIB_FRAMELAST_ROOT is not set in .env or environment")
-if not KNEE_MRI_ROOT:
-    print("[WARN] KNEE_MRI_ROOT is not set in .env or environment")
-if not SKM_TEA_MAIN_ROOT:
-    print("[WARN] SKM_TEA_MAIN_ROOT is not set in .env or environment")
+_env = {key: os.getenv(key) for key in ENV_KEYS}
+
+FASTMRI_ROOT = _env["FASTMRI_ROOT"]
+OAI_ZIB_ROOT = _env["OAI_ZIB_ROOT"]
+KAGGLE_KNEE_PCK_ROOT = _env["KAGGLE_KNEE_PCK_ROOT"]
+KNEE_MRI_ROOT = _env["KNEE_MRI_ROOT"]
+SKM_TEA_MAIN_ROOT = _env["SKM_TEA_MAIN_ROOT"]
+
+for key, value in _env.items():
+    if not value:
+        print(f"[WARN] {key} is not set in .env or environment")
+
+__all__ = [
+    "FASTMRI_ROOT",
+    "OAI_ZIB_ROOT",
+    "KAGGLE_KNEE_PCK_ROOT",
+    "KNEE_MRI_ROOT",
+    "SKM_TEA_MAIN_ROOT",
+]

@@ -28,3 +28,11 @@ outputs/
 Thumbs.db
 
 reference/
+
+# Generated artefacts (preprocessing/training outputs)
+artifacts/
+artifacts/**/*.pt
+artifacts/**/*.npz
+artifacts/**/*.npy
+artifacts/**/*.json
+artifacts/**/*.png

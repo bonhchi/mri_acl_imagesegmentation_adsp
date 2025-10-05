@@ -61,7 +61,7 @@ class MRIKneePreprocessor:
         # Clip
         img = self._percentile_clip(img, *self.clip_percentiles)
 
-        # Body mask
+        # Body mask (tune if ACL needed)
         mk = self._body_mask(img)
 
         # Optional N4
@@ -74,6 +74,7 @@ class MRIKneePreprocessor:
 
         # Resize
         img_r = self._resize_np(img, self.out_size)
+        # Mask resize for downstream steps
         mk_r = (self._resize_np(mk.astype(np.float32), self.out_size) > 0.5).astype(np.uint8)
 
         # Z-score (in-mask)
@@ -104,8 +105,18 @@ class MRIKneePreprocessor:
           }
         """
         ns = len(records)
+        if ns == 0:
+            raise ValueError("No records provided to preprocess_records.")
+
         s0 = max(0, int(ns * self.slice_keep[0]))
         s1 = min(ns, int(ns * self.slice_keep[1]))
+        s1 = max(s1, s0 + 1)
+        if s1 > ns:
+            s1 = ns
+        if s0 >= s1:
+            s0, s1 = 0, ns
+        if s0 >= s1:
+            raise ValueError("slice_keep produced an empty selection.")
 
         imgs, prevs, masks, idxs, sources, metas = [], [], [], [], [], []
         for i in range(s0, s1):
@@ -117,6 +128,9 @@ class MRIKneePreprocessor:
             idxs.append(m.get("slice_idx", i))
             sources.append(out["source"])
             metas.append(m)
+
+        if not imgs:
+            raise RuntimeError("No slices were processed from the provided records.")
 
         vol = np.stack(imgs, axis=0).astype(np.float32)  # (S,1,H,W)
         prv = np.stack(prevs, axis=0).astype(np.float32) # (S,H,W)
@@ -176,14 +190,23 @@ class MRIKneePreprocessor:
         t = F.interpolate(t, size=out_hw, mode="bilinear", align_corners=False)
         return t[0, 0].numpy().astype(np.float32)
 
+    # Mask logic lives here (ACL tweaks)
     @staticmethod
     def _body_mask(img: np.ndarray) -> np.ndarray:
         v = img - img.min()
         vmax = v.max()
-        if vmax > 0:
-            v = v / vmax
-        th = threshold_otsu(v)
+        if vmax <= 0:
+            return np.zeros_like(img, dtype=np.uint8)
+        v = v / vmax
+        try:
+            th = threshold_otsu(v)
+        except ValueError:
+            th = float(v.mean())
+        if not np.isfinite(th):
+            th = 0.5
         m = (v > th).astype(np.uint8)
+        if m.sum() == 0:
+            return m
         se = disk(2)
         m = binary_opening(m, se)
         m = binary_closing(m, se)

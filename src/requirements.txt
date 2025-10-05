@@ -1,19 +1,49 @@
-torch==2.4.1+cu121
-torchvision==0.19.1+cu121
---extra-index-url https://download.pytorch.org/whl/cu121
+###############################################################################
+# Core Deep Learning Stack (CUDA 12.8 + Python 3.13)
+###############################################################################
+--extra-index-url https://download.pytorch.org/whl/cu128
 
-monai[all]
-torchio
-nibabel
-SimpleITK
-h5py
-ismrmrd
-pydicom
-scikit-image
-opencv-python
-scipy
-matplotlib
-tqdm
-typer[all]
-pyyaml
-sigpy
+torch==2.7.1+cu128
+torchvision==0.22.1+cu128
+torchaudio==2.7.1+cu128
+
+###############################################################################
+# Medical Imaging / Segmentation Framework
+###############################################################################
+monai==1.5.1
+# Hoặc dùng bản dev mới nhất (nếu cần cập nhật tính năng):
+# git+https://github.com/Project-MONAI/MONAI.git
+
+###############################################################################
+# Core ML / CV Utilities
+###############################################################################
+numpy>=2.0.0
+scipy>=1.14.0
+pillow>=11.0.0
+tqdm>=4.66.0
+albumentations @ git+https://github.com/albumentations-team/albumentations.git
+opencv-python>=4.10.0.84
+matplotlib>=3.9.0
+scikit-image>=0.24.0
+scikit-learn>=1.5.0
+
+###############################################################################
+# IO, Data, Medical Formats
+###############################################################################
+nibabel>=5.3.0
+SimpleITK>=2.3.1
+pandas>=2.2.2
+pyyaml>=6.0.2
+
+###############################################################################
+# Model Utilities / Experiment Logging
+###############################################################################
+tensorboard>=2.17.0
+segmentation-models-pytorch>=0.3.3
+colorama>=0.4.6
+
+###############################################################################
+# System / Helper Utilities
+###############################################################################
+packaging>=25.0
+rich>=13.9.0

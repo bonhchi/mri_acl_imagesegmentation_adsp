@@ -20,7 +20,7 @@ except Exception:
     from src.train.losses import build_loss as _build_loss
 
 # Logger adapters bạn đã có
-from src.train.log_adapters import CSVLoggerAdapter, NoOpLogger
+from src.train.log_adapter import CSVLoggerAdapter, NoOpLogger
 
 # Engine (class) đã refactor
 from src.train.engine import Engine

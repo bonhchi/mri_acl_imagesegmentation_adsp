@@ -1,0 +1,107 @@
+# 🧠 Image Segmentation MRI – FastMRI Pipeline (RTX 3060 + Python 3.13)
+
+## 1️⃣ Chuẩn bị môi trường
+cd /d D:\Master\ImageSegmentation\Demo
+
+python -m venv .venv
+call .venv\Scripts\activate
+
+python -m pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+
+⚠️ Nếu báo thiếu thư viện dotenv → cài thêm:
+pip install python-dotenv
+
+
+## 2️⃣ Kiểm tra dữ liệu fastMRI
+Dữ liệu `.h5` nằm trong:
+D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train
+
+Kiểm tra:
+dir /s /b D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train\*.h5
+
+Nếu có file `.h5` → chạy lệnh sau để thử adapter:
+python -m src.main --dataset fastmri --root "D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train"
+✅ Nếu thấy “Dataset size: …” nghĩa là đọc được dữ liệu.
+
+
+## 3️⃣ Preprocess thành volume (.npz / .pt)
+python -m src.main ^
+  --dataset fastmri ^
+  --root "D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train" ^
+  --root_dir "D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train" ^
+  --out_dir artifacts\fastmri_knee ^
+  --preview_max 6
+
+Kết quả:
+artifacts\fastmri_knee\<case_id>\volume.npz
+                                \tensor.pt
+                                \masks\
+                                \preview.png
+                                \summary.json
+
+
+## 4️⃣ Tạo danh sách train/val
+:: Gom tất cả volume.npz vào danh sách
+for /r artifacts\fastmri_knee %f in (volume.npz) do @echo %f>>all.txt
+
+:: Chia 80/20 train/val
+python - <<EOF
+import random, pathlib
+p=pathlib.Path("all.txt")
+L=[l.strip() for l in p.read_text().splitlines() if l.strip()]
+random.seed(42); random.shuffle(L)
+k=int(len(L)*0.8)
+pathlib.Path("lists").mkdir(exist_ok=True)
+pathlib.Path("lists/train.txt").write_text("\n".join(L[:k]))
+pathlib.Path("lists/val.txt").write_text("\n".join(L[k:]))
+print("Train:",k," Val:",len(L)-k)
+EOF
+
+
+## 5️⃣ Train U-Net (2D/2.5D)
+python -m src.train.train_unet ^
+  --train-list lists\train.txt ^
+  --val-list lists\val.txt ^
+  --out-dir runs\fastmri_unet ^
+  --epochs 20 ^
+  --batch-size 8 ^
+  --workers 4 ^
+  --amp
+
+Nếu lỗi “CUDA out of memory” → giảm batch size:
+--batch-size 4
+
+Kết quả:
+runs\fastmri_unet\best.ckpt
+runs\fastmri_unet\history.csv
+runs\fastmri_unet\samples_epXX\
+
+
+## 6️⃣ Theo dõi bằng TensorBoard
+tensorboard --logdir runs\fastmri_unet
+→ Mở http://localhost:6006
+
+
+## 7️⃣ Inference (tuỳ chọn)
+python -m src.infer --ckpt runs\fastmri_unet\best.ckpt
+
+
+## 🧩 Ghi chú thêm
+| Thành phần | Ý nghĩa |
+|-------------|----------|
+| .env | Khai báo đường dẫn dataset (FASTMRI_ROOT, KNEE_MRI_ROOT, …) |
+| artifacts/ | Dữ liệu đã preprocess (volume.npz, mask, tensor.pt) |
+| lists/ | Danh sách train / val |
+| runs/ | Log training, checkpoint, sample ảnh |
+| src/ | Mã nguồn chính (adapter, train, infer, utils, …) |
+
+
+## ✅ Kiểm tra nhanh GPU và môi trường
+python - <<EOF
+import torch, monai
+print("Torch:", torch.__version__, "CUDA available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
+print("MONAI:", monai.__version__)
+EOF
