@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json, argparse, numpy as np, torch
 from time import time
+from datetime import datetime
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
@@ -116,8 +117,18 @@ class UNet2DTrainer:
     def __init__(self, args: UNet2DArgs):
         self.args = args
         set_seed(args.seed)
-        self.out_dir = Path(args.out_dir)
+        base_out_dir = Path(args.out_dir)
+        base_out_dir.mkdir(parents=True, exist_ok=True)
+        day_stamp = datetime.now().strftime("%Y-%m-%d")
+        run_name = f"{day_stamp}_{args.model}_{args.encoder}"
+        run_dir = base_out_dir / run_name
+        suffix = 2
+        while run_dir.exists():
+            run_dir = base_out_dir / f"{run_name}_{suffix:02d}"
+            suffix += 1
+        self.out_dir = run_dir
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.args.out_dir = str(self.out_dir)
         self._dump_config()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -204,7 +215,7 @@ class UNet2DTrainer:
             self.optimizer,
             mode="min",
             factor=0.5,
-            patience=3,
+            patience=8,
         )
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.args.amp)
 
