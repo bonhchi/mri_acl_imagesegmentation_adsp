@@ -60,14 +60,7 @@ EOF
 
 
 ## Train U-Net (2D/2.5D)
-python -m src.train.train_unet ^
-  --train-list lists\train.txt ^
-  --val-list lists\val.txt ^
-  --out-dir runs\fastmri_unet ^
-  --epochs 20 ^
-  --batch-size 8 ^
-  --workers 4 ^
-  --amp
+python -m src.train_unet_launcher --epochs 80 --batch-size 8 --workers 4 --amp
 
 Nếu lỗi “CUDA out of memory” → giảm batch size:
 --batch-size 4

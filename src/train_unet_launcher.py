@@ -14,7 +14,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.adapters.fastmri_adapter import FastMRISinglecoilAdapter  # type: ignore
 from src.main import build_preprocess  # type: ignore
-from src.train.train_unet import UNet2DArgs, UNet2DTrainer  # type: ignore
 
 
 def _default_dataset_root() -> Optional[Path]:
@@ -38,6 +37,20 @@ def _split_ratio(value: str) -> float:
     if not 0.0 < ratio < 1.0:
         raise argparse.ArgumentTypeError("split-ratio must be within (0, 1)")
     return ratio
+
+
+def _has_preprocessed_volumes(artifact_dir: Path) -> bool:
+    if not artifact_dir.exists():
+        return False
+    return any(artifact_dir.rglob("volume.npz"))
+
+
+def _existing_lists(list_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    train_path = list_dir / "train.txt"
+    val_path = list_dir / "val.txt"
+    train = train_path if train_path.exists() else None
+    val = val_path if val_path.exists() else None
+    return train, val
 
 
 def run_preprocess(
@@ -108,6 +121,8 @@ def generate_split(
 
 
 def run_training(train_list: Path, val_list: Path, out_dir: Path, args: argparse.Namespace) -> None:
+    from src.train.train_unet import UNet2DArgs, UNet2DTrainer  # type: ignore
+
     train_args = UNet2DArgs(
         train_list=str(train_list),
         val_list=str(val_list),
@@ -144,7 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dataset-root",
         type=Path,
         default=_default_dataset_root(),
-        help="Path to raw fastMRI single-coil dataset. Required unless --skip-preprocess is set.",
+        help="Path to raw fastMRI single-coil dataset. Required unless artefacts already exist.",
     )
     parser.add_argument(
         "--artifact-dir",
@@ -167,12 +182,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-preprocess",
         action="store_true",
-        help="Skip preprocess even if dataset-root is provided.",
+        help="Force skipping preprocess even if artefacts are missing.",
     )
     parser.add_argument(
         "--skip-split",
         action="store_true",
-        help="Skip generating train/val lists.",
+        help="Force skipping train/val split generation.",
     )
     parser.add_argument(
         "--skip-train",
@@ -300,10 +315,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     out_dir = Path(args.out_dir).resolve()
 
     dataset_root = Path(args.dataset_root).resolve() if args.dataset_root else None
+    if dataset_root is not None and not dataset_root.exists():
+        print(f"[warn] Dataset root {dataset_root} does not exist; treating as unavailable.")
+        dataset_root = None
 
-    if not args.skip_preprocess:
-        if dataset_root is None:
-            parser.error("Provide --dataset-root or set FASTMRI_ROOT unless --skip-preprocess is used.")
+    artefacts_exist = _has_preprocessed_volumes(artifact_dir)
+    auto_skip_preprocess = False
+    if args.skip_preprocess:
+        print("[step] Skipping preprocess step (flag).")
+    else:
+        if artefacts_exist and dataset_root is None:
+            print(f"[step] Found existing artefacts in {artifact_dir}, skipping preprocess automatically.")
+            auto_skip_preprocess = True
+        elif artefacts_exist:
+            print(f"[step] Artefacts already present in {artifact_dir}, preprocess skipped.")
+            auto_skip_preprocess = True
+        elif dataset_root is None:
+            parser.error(
+                "No artefacts found and dataset-root missing. Provide --dataset-root or "
+                "set FASTMRI_ROOT to enable preprocessing."
+            )
+
+    if not args.skip_preprocess and not auto_skip_preprocess:
         run_preprocess(
             dataset_root,
             artifact_dir,
@@ -315,30 +348,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.use_denoise,
             args.preview_max,
         )
-    else:
-        print("[step] Skipping preprocess step.")
 
     generated_train: Optional[Path] = None
     generated_val: Optional[Path] = None
-    if not args.skip_split:
-        generated_train, generated_val = generate_split(
-            artifact_dir,
-            list_dir,
-            args.split_ratio,
-            args.split_seed,
-        )
+
+    existing_train, existing_val = _existing_lists(list_dir)
+    auto_skip_split = False
+
+    if args.skip_split:
+        print("[step] Skipping train/val split generation (flag).")
     else:
-        print("[step] Skipping train/val split generation.")
+        if args.train_list and args.val_list:
+            print("[step] Train/val lists provided, skip split generation.")
+            auto_skip_split = True
+        elif existing_train and existing_val:
+            print(f"[step] Reusing existing train/val lists in {list_dir}.")
+            auto_skip_split = True
+        else:
+            generated_train, generated_val = generate_split(
+                artifact_dir,
+                list_dir,
+                args.split_ratio,
+                args.split_seed,
+            )
 
     train_list = (
         Path(args.train_list).resolve()
         if args.train_list
-        else (generated_train if generated_train else list_dir / "train.txt")
+        else (
+            generated_train
+            if generated_train
+            else (existing_train if existing_train else list_dir / "train.txt")
+        )
     )
     val_list = (
         Path(args.val_list).resolve()
         if args.val_list
-        else (generated_val if generated_val else list_dir / "val.txt")
+        else (
+            generated_val if generated_val else (existing_val if existing_val else list_dir / "val.txt")
+        )
     )
 
     if not train_list.exists():

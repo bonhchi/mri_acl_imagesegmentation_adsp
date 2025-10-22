@@ -1,0 +1,20 @@
+{
+  "best": {
+    "epoch": 80,
+    "train_loss": 0.022984466897323728,
+    "val_loss": 0.018200827782520173,
+    "val_dice": 0.9851784712093266,
+    "val_iou": 0.9709990310634788,
+    "lr": 0.0005
+  },
+  "final": {
+    "epoch": 80,
+    "train_loss": 0.022984466897323728,
+    "val_loss": 0.018200827782520173,
+    "val_dice": 0.9851784712093266,
+    "val_iou": 0.9709990310634788,
+    "lr": 0.0005
+  },
+  "best_ckpt": "D:\\Master\\ImageSegmentation\\Demo\\runs\\fastmri_unet\\2025-10-11_unet_resnet34\\best.pt",
+  "epochs": 80
+}
