@@ -53,7 +53,7 @@ class MRIKneePreprocessor:
             'source': 'image'|'target'|'kspace'
           }
         """
-        x, src, meta = self._normalize_record_input(record)
+        x, src, meta, mask_override = self._normalize_record_input(record)
 
         # Recon nếu là kspace
         img = self.ifft2c_single(x) if src == "kspace" else x
@@ -62,7 +62,10 @@ class MRIKneePreprocessor:
         img = self._percentile_clip(img, *self.clip_percentiles)
 
         # Body mask (tune if ACL needed)
-        mk = self._body_mask(img)
+        if mask_override is not None:
+            mk = self._normalize_mask(mask_override, img.shape)
+        else:
+            mk = self._body_mask(img)
 
         # Optional N4
         if self.use_n4:
@@ -190,6 +193,17 @@ class MRIKneePreprocessor:
         t = F.interpolate(t, size=out_hw, mode="bilinear", align_corners=False)
         return t[0, 0].numpy().astype(np.float32)
 
+    @staticmethod
+    def _normalize_mask(mask: Any, expected_shape: Tuple[int, int]) -> np.ndarray:
+        arr = np.asarray(mask)
+        if arr.ndim > 2:
+            arr = np.squeeze(arr)
+        if arr.shape != expected_shape:
+            arr = MRIKneePreprocessor._resize_np(arr.astype(np.float32), expected_shape)
+        else:
+            arr = arr.astype(np.float32, copy=False)
+        return (arr > 0.5).astype(np.uint8)
+
     # Mask logic lives here (ACL tweaks)
     @staticmethod
     def _body_mask(img: np.ndarray) -> np.ndarray:
@@ -264,7 +278,7 @@ class MRIKneePreprocessor:
 
     # --------- adapter contract normalization ----------
     @staticmethod
-    def _normalize_record_input(record: Dict[str, Any]) -> Tuple[np.ndarray, str, Dict[str, Any]]:
+    def _normalize_record_input(record: Dict[str, Any]) -> Tuple[np.ndarray, str, Dict[str, Any], Optional[np.ndarray]]:
         """
         Ưu tiên: image -> target(reconstruction*) -> kspace
         - image/target: float32 (H,W)
@@ -272,14 +286,19 @@ class MRIKneePreprocessor:
         """
         meta = record.get("meta", {})
 
+        raw_mask = record.get("mask")
+        mask_np: Optional[np.ndarray] = None
+        if raw_mask is not None:
+            mask_np = np.asarray(raw_mask)
+
         if record.get("image", None) is not None:
             img = MRIKneePreprocessor._ensure_2d(MRIKneePreprocessor._to_float32(record["image"]), "image")
-            return img, "image", meta
+            return img, "image", meta, mask_np
 
         for k in ("target", "reconstruction", "reconstruction_rss", "reconstruction_esc"):
             if record.get(k, None) is not None:
                 rec = MRIKneePreprocessor._ensure_2d(MRIKneePreprocessor._to_float32(record[k]), k)
-                return rec, "target", meta
+                return rec, "target", meta, mask_np
 
         ksp = record.get("kspace", None)
         if ksp is None:
@@ -293,7 +312,7 @@ class MRIKneePreprocessor:
                 # pass
                 raise ValueError("kspace không phải complex. Hãy ghép (real,imag) -> complex trước khi preprocess.")
         ksp = MRIKneePreprocessor._ensure_2d(ksp, "kspace")
-        return ksp, "kspace", meta
+        return ksp, "kspace", meta, mask_np
 
 
 # --------- convenience API ----------

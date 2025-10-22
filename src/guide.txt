@@ -80,6 +80,25 @@ tensorboard --logdir runs\fastmri_unet
 python -m src.infer --ckpt runs\fastmri_unet\best.ckpt
 
 
+
+
+## KneeMRI (.pck) Pipeline
+:: 1) Preprocess + split + train (all-in-one)
+python -m src.train_unet_launcher ^
+  --dataset kneemri ^
+  --dataset-root "D:\Master\ImageSegmentation\Demo\dataset\kneemri" ^
+  --artifact-dir artifacts\kneemri_acl ^
+  --out-dir runs\kneemri_unet ^
+  --slice-keep 0,1 ^
+  --epochs 60 ^
+  --batch-size 6 ^
+  --workers 4 ^
+  --amp
+
+:: Khi da co artifacts thi co the them --skip-preprocess
+:: Neu muon giu nguyen train/val list hien co thi them --skip-split
+Mask tung slice duoc tao tu ROI trong metadata.csv -> training binary segmentation.
+
 ## Ghi chú thêm
 | Thành phần | Ý nghĩa |
 |-------------|----------|

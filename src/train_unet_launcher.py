@@ -13,19 +13,40 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from src.adapters.fastmri_adapter import FastMRISinglecoilAdapter  # type: ignore
+from src.adapters.knee_mri_adapter import KneeMRIVolumeAdapter  # type: ignore
 from src.main import build_preprocess  # type: ignore
 
 
-def _default_dataset_root() -> Optional[Path]:
+_DATASET_ENV_KEYS = {
+    "fastmri": "FASTMRI_ROOT",
+    "kneemri": "KNEE_MRI_ROOT",
+}
+
+_DATASET_DEFAULT_DIRS = {
+    "fastmri": {
+        "artifact": Path("artifacts") / "fastmri_knee",
+        "out": Path("runs") / "fastmri_unet",
+    },
+    "kneemri": {
+        "artifact": Path("artifacts") / "kneemri_acl",
+        "out": Path("runs") / "kneemri_unet",
+    },
+}
+
+
+def _default_dataset_root(dataset: str) -> Optional[Path]:
+    env_key = _DATASET_ENV_KEYS.get(dataset.lower())
+    if not env_key:
+        return None
     for module_name in ("src.configs.config", "configs.config"):
         try:
-            module = __import__(module_name, fromlist=("FASTMRI_ROOT",))
-            value = getattr(module, "FASTMRI_ROOT", None)
+            module = __import__(module_name, fromlist=(env_key,))
+            value = getattr(module, env_key, None)
             if value:
                 return Path(value)
         except Exception:
             continue
-    env = os.getenv("FASTMRI_ROOT")
+    env = os.getenv(env_key)
     return Path(env) if env else None
 
 
@@ -53,9 +74,19 @@ def _existing_lists(list_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
     return train, val
 
 
+def _build_adapter(dataset: str, dataset_root: Path):
+    dataset = dataset.lower()
+    if dataset == "fastmri":
+        return FastMRISinglecoilAdapter(root_dir=str(dataset_root))
+    if dataset == "kneemri":
+        return KneeMRIVolumeAdapter(root_dir=str(dataset_root))
+    raise ValueError(f"Unsupported dataset: {dataset}")
+
+
 def run_preprocess(
+    dataset: str,
     dataset_root: Path,
-    out_dir: Path,
+    artifact_dir: Path,
     height: int,
     width: int,
     slice_keep: str,
@@ -64,10 +95,14 @@ def run_preprocess(
     use_denoise: bool,
     preview_max: int,
 ) -> int:
-    adapter = FastMRISinglecoilAdapter(root_dir=str(dataset_root))
+    if dataset == "kneemri" and slice_keep == "0.3,0.7":
+        print("[info] Overriding slice-keep to 0.0,1.0 for kneemri dataset.")
+        slice_keep = "0.0,1.0"
+
+    adapter = _build_adapter(dataset, dataset_root)
     args = SimpleNamespace(
         root_dir=str(dataset_root),
-        out_dir=str(out_dir),
+        out_dir=str(artifact_dir),
         height=height,
         width=width,
         slice_keep=slice_keep,
@@ -76,7 +111,7 @@ def run_preprocess(
         use_denoise=use_denoise,
         preview_max=preview_max,
     )
-    print(f"[step] Preprocess input volumes -> {out_dir}")
+    print(f"[step] Preprocess input volumes -> {artifact_dir}")
     results = build_preprocess(args, adapter=adapter)
     print(f"[done] Preprocess generated {len(results)} volume artefact(s)")
     return len(results)
@@ -152,19 +187,25 @@ def run_training(train_list: Path, val_list: Path, out_dir: Path, args: argparse
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Preprocess fastMRI volumes and launch U-Net training.",
+        description="Preprocess MRI volumes and launch U-Net training.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--dataset",
+        default="fastmri",
+        choices=["fastmri", "kneemri"],
+        help="Dataset key: fastmri (.h5) or kneemri (.pck volumes).",
     )
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=_default_dataset_root(),
-        help="Path to raw fastMRI single-coil dataset. Required unless artefacts already exist.",
+        default=None,
+        help="Path to raw dataset. Defaults to FASTMRI_ROOT or KNEE_MRI_ROOT based on --dataset.",
     )
     parser.add_argument(
         "--artifact-dir",
         type=Path,
-        default=Path("artifacts") / "fastmri_knee",
+        default=None,
         help="Directory where preprocess artefacts are stored.",
     )
     parser.add_argument(
@@ -176,7 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("runs") / "fastmri_unet",
+        default=None,
         help="Training output directory.",
     )
     parser.add_argument(
@@ -310,14 +351,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    artifact_dir = Path(args.artifact_dir).resolve()
-    list_dir = Path(args.list_dir).resolve()
-    out_dir = Path(args.out_dir).resolve()
+    dataset = args.dataset.lower()
+    defaults = _DATASET_DEFAULT_DIRS.get(dataset, {})
 
-    dataset_root = Path(args.dataset_root).resolve() if args.dataset_root else None
+    artifact_dir = Path(args.artifact_dir) if args.artifact_dir else defaults.get(
+        "artifact", Path("artifacts") / f"{dataset}_knee"
+    )
+    artifact_dir = artifact_dir.resolve()
+    list_dir = Path(args.list_dir).resolve()
+    out_dir = Path(args.out_dir) if args.out_dir else defaults.get("out", Path("runs") / f"{dataset}_unet")
+    out_dir = out_dir.resolve()
+    args.artifact_dir = artifact_dir
+    args.out_dir = out_dir
+
+    dataset_root: Optional[Path]
+    if args.dataset_root is not None:
+        dataset_root = Path(args.dataset_root).resolve()
+    else:
+        dataset_root = _default_dataset_root(dataset)
+        if dataset_root is not None:
+            dataset_root = dataset_root.resolve()
     if dataset_root is not None and not dataset_root.exists():
         print(f"[warn] Dataset root {dataset_root} does not exist; treating as unavailable.")
         dataset_root = None
+    args.dataset_root = dataset_root
 
     artefacts_exist = _has_preprocessed_volumes(artifact_dir)
     auto_skip_preprocess = False
@@ -331,13 +388,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"[step] Artefacts already present in {artifact_dir}, preprocess skipped.")
             auto_skip_preprocess = True
         elif dataset_root is None:
+            env_hint = _DATASET_ENV_KEYS.get(dataset, "DATASET_ROOT")
             parser.error(
                 "No artefacts found and dataset-root missing. Provide --dataset-root or "
-                "set FASTMRI_ROOT to enable preprocessing."
+                f"set {env_hint} to enable preprocessing."
             )
 
     if not args.skip_preprocess and not auto_skip_preprocess:
+        assert dataset_root is not None
         run_preprocess(
+            dataset,
             dataset_root,
             artifact_dir,
             args.height,
