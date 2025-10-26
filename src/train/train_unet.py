@@ -21,14 +21,10 @@ except Exception:
     from src.train.losses import build_loss as _build_loss
 
 # Logger adapters bạn đã có
-from src.train.log_adapter import CSVLoggerAdapter, NoOpLogger
+from src.train.log_adapter import make_logger
 
 # Engine (class) đã refactor
 from src.train.engine import Engine
-
-
-def make_logger(kind: str, out_dir: str):
-    return CSVLoggerAdapter(out_dir) if kind == "csv" else NoOpLogger()
 
 
 def set_seed(s: int):
@@ -67,7 +63,7 @@ class UNet2DArgs:
     seed: int = 2024
 
     # logging/save
-    logger: str = "csv"                      # noop|csv
+    logger: str = "csv+tensorboard"          # noop|csv|tensorboard|csv+tensorboard
     save_val_probs: bool = False
 
     # misc
@@ -99,7 +95,11 @@ def parse_args() -> UNet2DArgs:
     p.add_argument("--amp", action="store_true")
     p.add_argument("--seed", type=int, default=2024)
     # logging/save
-    p.add_argument("--logger", default="csv", choices=["noop", "csv"])
+    p.add_argument(
+        "--logger",
+        default="csv+tensorboard",
+        help="Logger backend(s). Accepts 'noop', 'csv', 'tensorboard', or combinations like 'csv+tensorboard'.",
+    )
     p.add_argument("--save-val-probs", action="store_true")
     # misc
     p.add_argument("--max-grad-norm", type=float, default=5.0)
@@ -316,6 +316,12 @@ class UNet2DTrainer:
                 self._record_best(ep, train_loss, val_loss, val_dice, val_iou, lr)
                 self._save_best()
                 self._save_val_probs_if_needed()
+                if hasattr(self.logger, "log_best"):
+                    self.logger.log_best(
+                        epoch=ep,
+                        key=float(metric_key),
+                        ckpt_path=str(self.best_ckpt_path),
+                    )
 
             if ep == 1 or ep % 5 == 0:
                 self.engine.save_samples(self.val_ld, str(self.out_dir), max_samples=6)

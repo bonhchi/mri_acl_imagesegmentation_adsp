@@ -340,9 +340,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--classes", type=int, default=1, help="Number of output classes.")
     parser.add_argument(
         "--logger",
-        default="csv",
-        choices=["noop", "csv"],
-        help="Logger backend.",
+        default="csv+tensorboard",
+        help="Logger backend(s). Accepts 'noop', 'csv', 'tensorboard', or a '+'-joined combination such as 'csv+tensorboard'.",
     )
     parser.add_argument(
         "--save-val-probs",

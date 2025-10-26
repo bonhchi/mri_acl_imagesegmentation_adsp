@@ -1,117 +1,161 @@
-# Image Segmentation MRI – FastMRI Pipeline (RTX 3060 + Python 3.13)
+==========================
+HƯỚNG DẪN LÀM VIỆC (TIẾNG VIỆT)
+==========================
 
-## Chuẩn bị môi trường
-cd /d D:\Master\ImageSegmentation\Demo
+1. Chuẩn bị môi trường
+----------------------
+- Mở PowerShell và di chuyển tới dự án:
+    cd /d D:\Master\ImageSegmentation\Demo
+- Tạo virtualenv:
+    python -m venv .venv
+    .\.venv\Scripts\activate
+- Cập nhật tooling và cài đặt phụ thuộc:
+    python -m pip install --upgrade pip setuptools wheel
+    pip install -r requirements.txt
+- Nếu thiếu dotenv:
+    pip install python-dotenv
+- Kiểm tra nhanh phiên bản:
+    python - <<'PY'
+    import torch, monai
+    print("Torch:", torch.__version__, "CUDA:", torch.cuda.is_available())
+    if torch.cuda.is_available():
+        print("GPU:", torch.cuda.get_device_name(0))
+    print("MONAI:", monai.__version__)
+    PY
 
-python -m venv .venv
-call .venv\Scripts\activate
+2. Cấu trúc chính
+-----------------
+| Thư mục | Vai trò |
+| artifacts/ | Kết quả preprocess (volume.npz, tensor.pt, preview) |
+| dataset/   | Dữ liệu thô fastMRI (.h5), KneeMRI (.pck), OAI-ZIB (.npz) |
+| lists/     | train.txt + val.txt cho các lần training |
+| runs/      | Lưu checkpoint (`best.pt`), lịch sử, ảnh mẫu |
+| src/       | Mã nguồn adapters, preprocess, training |
+| src/.env   | (nếu có) Khai báo FASTMRI_ROOT, KNEE_MRI_ROOT, OAI_ZIB_ROOT |
 
-python -m pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
+3. Tiền xử lý dữ liệu
+---------------------
+3.1 fastMRI (HDF5)
+    python src/train_unet_launcher.py ^
+      --dataset fastmri ^
+      --dataset-root dataset/singlecoil_train ^
+      --artifact-dir artifacts/fastmri_knee ^
+      --preview-max 6
 
-Nếu báo thiếu thư viện dotenv → cài thêm:
-pip install python-dotenv
+3.2 KneeMRI (pickle volume + ROI)
+    python src/train_unet_launcher.py ^
+      --dataset kneemri ^
+      --dataset-root dataset/kneemri ^
+      --artifact-dir artifacts/kneemri_acl ^
+      --slice-keep 0.0,1.0 ^
+      --preview-max 6
 
+3.3 OAI-ZIB (npz + csv mapping)
+    python src/train_unet_launcher.py ^
+      --dataset oaizib ^
+      --dataset-root dataset/OAI-ZIB-framelast ^
+      --artifact-dir artifacts/oaizib_knee ^
+      --skip-split ^
+      --skip-train
 
-## Kiểm tra dữ liệu fastMRI
-Dữ liệu `.h5` nằm trong:
-D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train
+Ghi chú:
+- Các lần chạy sau có thể thêm `--skip-preprocess` để bỏ qua bước xử lý nếu volume.npz đã tồn tại.
+- Khi kết hợp nhiều bộ (fastmri + kneemri + oaizib), dùng `--dataset combine` ở bước train (không cần preprocess).
 
-Kiểm tra:
-dir /s /b D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train\*.h5
+4. Tạo danh sách train/val
+--------------------------
+Tự động bằng launcher:
+    python src/train_unet_launcher.py --dataset ... --skip-preprocess --skip-train
+Hoặc thủ công:
+    for /r artifacts\fastmri_knee %f in (volume.npz) do @echo %f>>lists\all.txt
+    python - <<'PY'
+    import random, pathlib
+    L = [ln.strip() for ln in pathlib.Path("lists/all.txt").read_text().splitlines() if ln.strip()]
+    random.seed(42); random.shuffle(L)
+    k = int(len(L) * 0.8)
+    pathlib.Path("lists/train.txt").write_text("\n".join(L[:k]), encoding="utf-8")
+    pathlib.Path("lists/val.txt").write_text("\n".join(L[k:]), encoding="utf-8")
+    PY
 
-Nếu có file `.h5` → chạy lệnh sau để thử adapter:
-python -m src.main --dataset fastmri --root "D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train"
-Nếu thấy “Dataset size: …” nghĩa là đọc được dữ liệu.
+5. Huấn luyện UNet 2D / 2.5D
+----------------------------
+Chạy end-to-end (preprocess + split + train):
+    python src/train_unet_launcher.py ^
+      --dataset fastmri ^
+      --dataset-root dataset/singlecoil_train ^
+      --artifact-dir artifacts/fastmri_knee ^
+      --out-dir runs/fastmri_unet ^
+      --epochs 80 ^
+      --batch-size 8 ^
+      --workers 4 ^
+      --amp
 
+Huấn luyện trên dữ liệu đã có list:
+    python src/train_unet_launcher.py ^
+      --dataset fastmri ^
+      --artifact-dir artifacts/fastmri_knee ^
+      --train-list lists/train.txt ^
+      --val-list lists/val.txt ^
+      --skip-preprocess ^
+      --skip-split ^
+      --epochs 80
 
-## Preprocess thành volume (.npz / .pt)
-python -m src.main ^
-  --dataset fastmri ^
-  --root "D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train" ^
-  --root_dir "D:\Master\ImageSegmentation\Demo\dataset\singlecoil_train" ^
-  --out_dir artifacts\fastmri_knee ^
-  --preview_max 6
+Các tùy chọn hay dùng:
+| Cờ | Ý nghĩa |
+| --skip-preprocess | Bỏ qua tạo volume (đã có sẵn) |
+| --skip-split      | Giữ nguyên train/val list hiện tại |
+| --skip-train      | Chỉ chạy tới bước trước training |
+| --model unetpp    | Chọn UNet++ |
+| --encoder densenet121 | Đổi backbone |
+| --run-tag exp1    | Gắn hậu tố vào thư mục run |
 
-Kết quả:
-artifacts\fastmri_knee\<case_id>\volume.npz
-                                \tensor.pt
-                                \masks\
-                                \preview.png
-                                \summary.json
+6. Huấn luyện UNet 3D
+---------------------
+Yêu cầu volume.npz cho từng dataset.
+    python src/train/train_unet3d.py ^
+      --train-list lists/train.txt ^
+      --val-list lists/val.txt ^
+      --out-dir runs/unet3d ^
+      --patch-size 160 160 64 ^
+      --patches-per-volume 12 ^
+      --batch-size 2 ^
+      --epochs 80 ^
+      --amp
 
+Các tùy chọn chính:
+| --pos-frac 0.5     | Tỷ lệ lấy patch dương |
+| --eval-overlap 0.5 | Độ chồng khi validate |
+| --channels ...     | Tùy chỉnh chiều UNet |
+| --normalize none   | Bỏ chuẩn hóa bổ sung |
 
-## 4️⃣ Tạo danh sách train/val
-:: Gom tất cả volume.npz vào danh sách
-for /r artifacts\fastmri_knee %f in (volume.npz) do @echo %f>>all.txt
+7. Theo dõi và checkpoints
+--------------------------
+- Checkpoint tốt nhất: `runs/<dataset>_unet/<run_name>/best.pt`
+- Các run đều lưu `history.csv`, `history.json`, ảnh mẫu trong `samples/`
+- TensorBoard (nếu bật logger tensorboard):
+    tensorboard --logdir runs/<dataset>_unet
+- Thư mục `checkpoints/` bên trong mỗi run để dành cho checkpoint phụ (mặc định rỗng).
 
-:: Chia 80/20 train/val
-python - <<EOF
-import random, pathlib
-p=pathlib.Path("all.txt")
-L=[l.strip() for l in p.read_text().splitlines() if l.strip()]
-random.seed(42); random.shuffle(L)
-k=int(len(L)*0.8)
-pathlib.Path("lists").mkdir(exist_ok=True)
-pathlib.Path("lists/train.txt").write_text("\n".join(L[:k]))
-pathlib.Path("lists/val.txt").write_text("\n".join(L[k:]))
-print("Train:",k," Val:",len(L)-k)
-EOF
+8. Inference nhanh
+------------------
+Ví dụ suy luận 2D:
+    python src/infer.py ^
+      --ckpt runs/fastmri_unet/2025-10-26_unet_resnet34/best.pt ^
+      --volume artifacts/fastmri_knee/file1000001/volume.npz ^
+      --out out/predict
 
-
-## Train U-Net (2D/2.5D)
-python -m src.train_unet_launcher --epochs 80 --batch-size 8 --workers 4 --amp
-
-Nếu lỗi “CUDA out of memory” → giảm batch size:
---batch-size 4
-
-Kết quả:
-runs\fastmri_unet\best.ckpt
-runs\fastmri_unet\history.csv
-runs\fastmri_unet\samples_epXX\
-
-
-## Theo dõi bằng TensorBoard
-tensorboard --logdir runs\fastmri_unet
-→ Mở http://localhost:6006
-
-
-## 7️⃣ Inference (tuỳ chọn)
-python -m src.infer --ckpt runs\fastmri_unet\best.ckpt
-
-
-## KneeMRI (.pck) Pipeline
-:: 1) Preprocess + split + train (all-in-one)
-python -m src.train_unet_launcher ^
-  --dataset kneemri ^
-  --dataset-root "D:\Master\ImageSegmentation\Demo\dataset\kneemri" ^
-  --artifact-dir artifacts\kneemri_acl ^
-  --out-dir runs\kneemri_unet ^
-  --slice-keep 0,1 ^
-  --epochs 60 ^
-  --batch-size 6 ^
-  --workers 4 ^
-  --amp
-
-:: Khi da co artifacts thi co the them --skip-preprocess
-:: Neu muon giu nguyen train/val list hien co thi them --skip-split
-Mask tung slice duoc tao tu ROI trong metadata.csv -> training binary segmentation.
-
-## Ghi chú thêm
-| Thành phần | Ý nghĩa |
-|-------------|----------|
-| .env | Khai báo đường dẫn dataset (FASTMRI_ROOT, KNEE_MRI_ROOT, …) |
-| artifacts/ | Dữ liệu đã preprocess (volume.npz, mask, tensor.pt) |
-| lists/ | Danh sách train / val |
-| runs/ | Log training, checkpoint, sample ảnh |
-| src/ | Mã nguồn chính (adapter, train, infer, utils, …) |
-
-
-## Kiểm tra nhanh GPU và môi trường
-python - <<EOF
-import torch, monai
-print("Torch:", torch.__version__, "CUDA available:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("GPU:", torch.cuda.get_device_name(0))
-print("MONAI:", monai.__version__)
-EOF
+9. Lưu ý cho kết hợp (combine)
+------------------------------
+- Cần chuẩn bị train.txt/val.txt liệt kê volume.npz từ nhiều bộ dữ liệu.
+- Huấn luyện:
+    python src/train_unet_launcher.py ^
+      --dataset combine ^
+      --artifact-dir artifacts/combine ^
+      --train-list lists/train_combine.txt ^
+      --val-list lists/val_combine.txt ^
+      --skip-preprocess ^
+      --skip-split ^
+      --run-tag combine ^
+      --epochs 80
+- Thư mục run sẽ có hậu tố `_combine`.
+*** End Patch

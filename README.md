@@ -1,0 +1,183 @@
+# Image Segmentation MRI – Tài liệu hướng dẫn
+
+Tài liệu này được chuyển hóa từ `src/guide.txt` và tóm tắt toàn bộ quy trình làm việc cho dự án.
+
+---
+
+## 1. Chuẩn bị môi trường
+
+```powershell
+cd /d D:\Master\ImageSegmentation\Demo
+python -m venv .venv
+.\.venv\Scripts\activate
+
+python -m pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+# nếu cần thêm
+pip install python-dotenv
+```
+
+Kiểm tra nhanh:
+
+```powershell
+python - <<'PY'
+import torch, monai
+print("Torch:", torch.__version__, "CUDA:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
+print("MONAI:", monai.__version__)
+PY
+```
+
+## 2. Cấu trúc thư mục
+
+| Thư mục   | Vai trò                                                     |
+|-----------|-------------------------------------------------------------|
+| `artifacts/` | Kết quả preprocess (`volume.npz`, `tensor.pt`, preview) |
+| `dataset/`   | Dữ liệu thô (fastMRI `.h5`, KneeMRI `.pck`, OAI-ZIB `.npz`) |
+| `lists/`     | `train.txt`, `val.txt` sử dụng khi train                 |
+| `runs/`      | Checkpoint (`best.pt`), lịch sử, ảnh mẫu                  |
+| `src/`       | Mã nguồn adapters, preprocess, training, inference       |
+| `.env`       | (tùy chọn) Khai báo `FASTMRI_ROOT`, `KNEE_MRI_ROOT`, ... |
+
+## 3. Tiền xử lý dữ liệu
+
+### fastMRI
+
+```powershell
+python src/train_unet_launcher.py `
+  --dataset fastmri `
+  --dataset-root dataset/singlecoil_train `
+  --artifact-dir artifacts/fastmri_knee `
+  --preview-max 6
+```
+
+### KneeMRI
+
+```powershell
+python src/train_unet_launcher.py `
+  --dataset kneemri `
+  --dataset-root dataset/kneemri `
+  --artifact-dir artifacts/kneemri_acl `
+  --slice-keep 0.0,1.0 `
+  --preview-max 6
+```
+
+### OAI-ZIB
+
+```powershell
+python src/train_unet_launcher.py `
+  --dataset oaizib `
+  --dataset-root dataset/OAI-ZIB-framelast `
+  --artifact-dir artifacts/oaizib_knee `
+  --skip-split `
+  --skip-train
+```
+
+> Tip: khi volume.npz đã tồn tại, thêm `--skip-preprocess`. Dataset "combine" chỉ cần ở bước train.
+
+## 4. Tạo danh sách train/val
+
+### Dùng launcher
+
+```powershell
+python src/train_unet_launcher.py --dataset <dataset> --skip-preprocess --skip-train
+```
+
+### Thủ công
+
+```powershell
+for /r artifacts\fastmri_knee %f in (volume.npz) do @echo %f>>lists\all.txt
+python - <<'PY'
+import random, pathlib
+L = [ln.strip() for ln in pathlib.Path("lists/all.txt").read_text().splitlines() if ln.strip()]
+random.seed(42); random.shuffle(L)
+k = int(len(L) * 0.8)
+pathlib.Path("lists/train.txt").write_text("\n".join(L[:k]), encoding="utf-8")
+pathlib.Path("lists/val.txt").write_text("\n".join(L[k:]), encoding="utf-8")
+PY
+```
+
+## 5. Huấn luyện U-Net 2D/2.5D
+
+### Pipeline đầy đủ
+
+```powershell
+python src/train_unet_launcher.py `
+  --dataset fastmri `
+  --dataset-root dataset/singlecoil_train `
+  --artifact-dir artifacts/fastmri_knee `
+  --out-dir runs/fastmri_unet `
+  --epochs 80 `
+  --batch-size 8 `
+  --workers 4 `
+  --amp
+```
+
+### Huấn luyện với danh sách có sẵn
+
+```powershell
+python src/train_unet_launcher.py `
+  --dataset fastmri `
+  --artifact-dir artifacts/fastmri_knee `
+  --train-list lists/train.txt `
+  --val-list lists/val.txt `
+  --skip-preprocess `
+  --skip-split `
+  --epochs 80
+```
+
+Tùy chọn thường dùng: `--skip-preprocess`, `--skip-split`, `--model unetpp`, `--encoder densenet121`, `--run-tag exp1`.
+
+## 6. Huấn luyện U-Net 3D
+
+```powershell
+python src/train/train_unet3d.py `
+  --train-list lists/train.txt `
+  --val-list lists/val.txt `
+  --out-dir runs/unet3d `
+  --patch-size 160 160 64 `
+  --patches-per-volume 12 `
+  --batch-size 2 `
+  --epochs 80 `
+  --amp
+```
+
+Tùy chọn: `--pos-frac`, `--eval-overlap`, `--channels`, `--normalize`, `--run-tag`.
+
+## 7. Theo dõi & Checkpoints
+
+- Checkpoint tốt nhất: `runs/<dataset>_unet/<run_name>/best.pt`
+- Log: `history.csv`, `history.json`, ảnh mẫu trong `samples/`
+- TensorBoard (nếu có):
+
+```powershell
+tensorboard --logdir runs/<dataset>_unet
+```
+
+## 8. Inference nhanh
+
+```powershell
+python src/infer.py `
+  --ckpt runs/fastmri_unet/2025-10-26_unet_resnet34/best.pt `
+  --volume artifacts/fastmri_knee/file1000001/volume.npz `
+  --out out/predict
+```
+
+## 9. Huấn luyện dữ liệu kết hợp (combine)
+
+Chuẩn bị `train_combine.txt`, `val_combine.txt` gồm nhiều nguồn khác nhau.
+
+```powershell
+python src/train_unet_launcher.py `
+  --dataset combine `
+  --artifact-dir artifacts/combine `
+  --train-list lists/train_combine.txt `
+  --val-list lists/val_combine.txt `
+  --skip-preprocess `
+  --skip-split `
+  --run-tag combine `
+  --epochs 80
+```
+
+Thư mục kết quả sẽ có hậu tố `_combine`.
