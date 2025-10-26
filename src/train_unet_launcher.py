@@ -14,12 +14,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.adapters.fastmri_adapter import FastMRISinglecoilAdapter  # type: ignore
 from src.adapters.knee_mri_adapter import KneeMRIVolumeAdapter  # type: ignore
+from src.adapters.oai_zib_adapter import OAIZibVolumeAdapter  # type: ignore
 from src.main import build_preprocess  # type: ignore
 
 
 _DATASET_ENV_KEYS = {
     "fastmri": "FASTMRI_ROOT",
     "kneemri": "KNEE_MRI_ROOT",
+    "oaizib": "OAI_ZIB_ROOT",
+    "combine": None,
 }
 
 _DATASET_DEFAULT_DIRS = {
@@ -30,6 +33,14 @@ _DATASET_DEFAULT_DIRS = {
     "kneemri": {
         "artifact": Path("artifacts") / "kneemri_acl",
         "out": Path("runs") / "kneemri_unet",
+    },
+    "oaizib": {
+        "artifact": Path("artifacts") / "oaizib_knee",
+        "out": Path("runs") / "oaizib_unet",
+    },
+    "combine": {
+        "artifact": Path("artifacts") / "combine",
+        "out": Path("runs") / "combine_unet",
     },
 }
 
@@ -80,6 +91,10 @@ def _build_adapter(dataset: str, dataset_root: Path):
         return FastMRISinglecoilAdapter(root_dir=str(dataset_root))
     if dataset == "kneemri":
         return KneeMRIVolumeAdapter(root_dir=str(dataset_root))
+    if dataset == "oaizib":
+        return OAIZibVolumeAdapter(root_dir=str(dataset_root))
+    if dataset == "combine":
+        raise ValueError("Dataset 'combine' does not expose a preprocessing adapter.")
     raise ValueError(f"Unsupported dataset: {dataset}")
 
 
@@ -95,10 +110,6 @@ def run_preprocess(
     use_denoise: bool,
     preview_max: int,
 ) -> int:
-    if dataset == "kneemri" and slice_keep == "0.3,0.7":
-        print("[info] Overriding slice-keep to 0.0,1.0 for kneemri dataset.")
-        slice_keep = "0.0,1.0"
-
     adapter = _build_adapter(dataset, dataset_root)
     args = SimpleNamespace(
         root_dir=str(dataset_root),
@@ -158,6 +169,13 @@ def generate_split(
 def run_training(train_list: Path, val_list: Path, out_dir: Path, args: argparse.Namespace) -> None:
     from src.train.train_unet import UNet2DArgs, UNet2DTrainer  # type: ignore
 
+    if args.run_tag:
+        run_tag_value = args.run_tag
+    elif getattr(args, "dataset", "") == "combine":
+        run_tag_value = "combine"
+    else:
+        run_tag_value = ""
+
     train_args = UNet2DArgs(
         train_list=str(train_list),
         val_list=str(val_list),
@@ -180,6 +198,7 @@ def run_training(train_list: Path, val_list: Path, out_dir: Path, args: argparse
         max_grad_norm=args.max_grad_norm,
         amp=args.amp,
         seed=args.seed,
+        run_tag=run_tag_value,
     )
     trainer = UNet2DTrainer(train_args)
     trainer.run()
@@ -193,14 +212,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset",
         default="fastmri",
-        choices=["fastmri", "kneemri"],
-        help="Dataset key: fastmri (.h5) or kneemri (.pck volumes).",
+        choices=["fastmri", "kneemri", "oaizib", "combine"],
+        help="Dataset key: fastmri | kneemri | oaizib | combine.",
     )
     parser.add_argument(
         "--dataset-root",
         type=Path,
         default=None,
-        help="Path to raw dataset. Defaults to FASTMRI_ROOT or KNEE_MRI_ROOT based on --dataset.",
+        help="Path to raw dataset. Defaults to FASTMRI_ROOT, KNEE_MRI_ROOT, or OAI_ZIB_ROOT. Not required for 'combine'.",
     )
     parser.add_argument(
         "--artifact-dir",
@@ -219,6 +238,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Training output directory.",
+    )
+    parser.add_argument(
+        "--run-tag",
+        type=str,
+        default=None,
+        help="Optional suffix appended to the training run folder name.",
     )
     parser.add_argument(
         "--skip-preprocess",
@@ -378,7 +403,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     artefacts_exist = _has_preprocessed_volumes(artifact_dir)
     auto_skip_preprocess = False
-    if args.skip_preprocess:
+
+    if dataset == "combine":
+        auto_skip_preprocess = True
+        if args.skip_preprocess:
+            print("[step] Combined dataset selected; preprocess step skipped (flag).")
+        else:
+            print("[step] Combined dataset selected; preprocess step skipped automatically.")
+    elif args.skip_preprocess:
         print("[step] Skipping preprocess step (flag).")
     else:
         if artefacts_exist and dataset_root is None:

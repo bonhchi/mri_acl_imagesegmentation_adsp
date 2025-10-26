@@ -80,8 +80,6 @@ tensorboard --logdir runs\fastmri_unet
 python -m src.infer --ckpt runs\fastmri_unet\best.ckpt
 
 
-
-
 ## KneeMRI (.pck) Pipeline
 :: 1) Preprocess + split + train (all-in-one)
 python -m src.train_unet_launcher ^

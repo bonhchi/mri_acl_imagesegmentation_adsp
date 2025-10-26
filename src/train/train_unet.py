@@ -47,6 +47,7 @@ class UNet2DArgs:
     train_list: str = ""
     val_list: str = ""
     out_dir: str = "runs/unet2d"
+    run_tag: str = ""
     k: int = 1
     aug: str = "light"                       # none|light|medium
     model: str = "unet"                      # unet|unetpp
@@ -79,6 +80,7 @@ def parse_args() -> UNet2DArgs:
     p.add_argument("--train-list", required=True)
     p.add_argument("--val-list", required=True)
     p.add_argument("--out-dir", default="runs/unet2d")
+    p.add_argument("--run-tag", default="", help="Optional suffix appended to the run directory.")
     p.add_argument("--k", type=int, default=1)
     p.add_argument("--aug", default="light", choices=["none", "light", "medium"])
     p.add_argument("--model", default="unet", choices=["unet", "unetpp"])
@@ -121,6 +123,10 @@ class UNet2DTrainer:
         base_out_dir.mkdir(parents=True, exist_ok=True)
         day_stamp = datetime.now().strftime("%Y-%m-%d")
         run_name = f"{day_stamp}_{args.model}_{args.encoder}"
+        suffix_tag = (args.run_tag or "").strip()
+        if suffix_tag:
+            safe_tag = suffix_tag.replace(" ", "_")
+            run_name = f"{run_name}_{safe_tag}"
         run_dir = base_out_dir / run_name
         suffix = 2
         while run_dir.exists():
