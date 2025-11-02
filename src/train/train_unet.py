@@ -1,13 +1,19 @@
 # -*- coding: utf-8 -*-
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import json, argparse, numpy as np, torch
+import json, argparse, numpy as np, torch, os
 from time import time
 from datetime import datetime
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
 from torch.utils.data import DataLoader
+
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
 from src.dataio.datasets import KneeNPZ2DSlices
 from src.models.unet_factory import build_unet
@@ -37,6 +43,69 @@ def set_seed(s: int):
     torch.backends.cudnn.benchmark = False
 
 
+class DevicePrefetchLoader:
+    """Wrap a DataLoader to pre-stage batches on a target device."""
+
+    def __init__(self, loader: DataLoader, device: torch.device) -> None:
+        self.loader = loader
+        self.device = device
+
+    def __len__(self) -> int:
+        return len(self.loader)
+
+    @property
+    def dataset(self):
+        return self.loader.dataset
+
+    def __getattr__(self, item):
+        return getattr(self.loader, item)
+
+    def __iter__(self):
+        if self.device.type != "cuda":
+            yield from self.loader
+            return
+
+        stream = torch.cuda.Stream()
+        iterator = iter(self.loader)
+
+        def _to_device(batch):
+            if isinstance(batch, (list, tuple)):
+                return type(batch)(
+                    item.to(self.device, non_blocking=True) if torch.is_tensor(item) else item
+                    for item in batch
+                )
+            if isinstance(batch, dict):
+                return {
+                    k: (v.to(self.device, non_blocking=True) if torch.is_tensor(v) else v)
+                    for k, v in batch.items()
+                }
+            if torch.is_tensor(batch):
+                return batch.to(self.device, non_blocking=True)
+            return batch
+
+        try:
+            next_batch = next(iterator)
+        except StopIteration:
+            return
+
+        with torch.cuda.stream(stream):
+            next_batch = _to_device(next_batch)
+
+        while True:
+            torch.cuda.current_stream().wait_stream(stream)
+            current = next_batch
+            try:
+                next_batch = next(iterator)
+            except StopIteration:
+                next_batch = None
+            if next_batch is not None:
+                with torch.cuda.stream(stream):
+                    next_batch = _to_device(next_batch)
+            yield current
+            if next_batch is None:
+                break
+
+
 @dataclass
 class UNet2DArgs:
     # data/model
@@ -51,6 +120,7 @@ class UNet2DArgs:
     encoder_weights: str = "none"
     classes: int = 1
     imagenet_norm: bool = False
+    cache_mode: str = "none"
 
     # train
     batch_size: int = 12
@@ -68,6 +138,8 @@ class UNet2DArgs:
 
     # misc
     max_grad_norm: float = 5.0
+    prefetch_gpu: bool = False
+    auto_gpu: bool = False
 
 
 def parse_args() -> UNet2DArgs:
@@ -84,6 +156,12 @@ def parse_args() -> UNet2DArgs:
     p.add_argument("--encoder-weights", default="none")
     p.add_argument("--classes", type=int, default=1)
     p.add_argument("--imagenet-norm", action="store_true")
+    p.add_argument(
+        "--cache-mode",
+        default="none",
+        choices=["none", "cpu"],
+        help="Caching strategy for NPZ volumes (none: read every access, cpu: keep full volumes in RAM).",
+    )
     # train
     p.add_argument("--batch-size", type=int, default=12)
     p.add_argument("--epochs", type=int, default=40)
@@ -103,6 +181,16 @@ def parse_args() -> UNet2DArgs:
     p.add_argument("--save-val-probs", action="store_true")
     # misc
     p.add_argument("--max-grad-norm", type=float, default=5.0)
+    p.add_argument(
+        "--prefetch-gpu",
+        action="store_true",
+        help="Stage batches on GPU memory to reduce host RAM pressure.",
+    )
+    p.add_argument(
+        "--auto-gpu",
+        action="store_true",
+        help="Heuristically increase GPU utilisation (enables AMP, GPU prefetch, larger batch/workers when VRAM is available).",
+    )
     a = p.parse_args()
     return UNet2DArgs(**vars(a))
 
@@ -135,9 +223,23 @@ class UNet2DTrainer:
         self.out_dir = run_dir
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.args.out_dir = str(self.out_dir)
+        start_stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.epoch_log_path = self.out_dir / "epoch_log.txt"
+        self.aggregate_log_path = self.out_dir.parent / "training_runs.log"
+        header = (
+            f"# Run {self.out_dir.name} | model={args.model} | encoder={args.encoder} | "
+            f"epochs={args.epochs} | started {start_stamp}\n"
+        )
+        with self.epoch_log_path.open("w", encoding="utf-8") as fh:
+            fh.write(header)
+        with self.aggregate_log_path.open("a", encoding="utf-8") as fh:
+            fh.write("\n" + header)
         self._dump_config()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        if getattr(self.args, "auto_gpu", False):
+            self._apply_auto_gpu_tweaks()
 
         self._build_dataloaders()
         self._build_model()
@@ -175,9 +277,12 @@ class UNet2DTrainer:
             k=self.args.k,
             imagenet_norm=self.args.imagenet_norm,
             encoder_name=self.args.encoder,
+            cache_mode=self.args.cache_mode,
         )
         self.train_ds = KneeNPZ2DSlices(self.args.train_list, aug=self.args.aug, **common)
         self.val_ds = KneeNPZ2DSlices(self.args.val_list, aug="none", **common)
+        print(f"[data] Train slices by dataset: {self.train_ds.dataset_summary}")
+        print(f"[data] Val slices by dataset:   {self.val_ds.dataset_summary}")
         self.train_ld = DataLoader(
             self.train_ds,
             batch_size=self.args.batch_size,
@@ -193,6 +298,49 @@ class UNet2DTrainer:
             num_workers=self.args.workers,
             pin_memory=True,
         )
+        if self.args.prefetch_gpu and self.device.type == "cuda":
+            self.train_ld = DevicePrefetchLoader(self.train_ld, self.device)
+            self.val_ld = DevicePrefetchLoader(self.val_ld, self.device)
+
+    def _apply_auto_gpu_tweaks(self) -> None:
+        if self.device.type != "cuda":
+            print("[auto-gpu] CUDA unavailable; skipping GPU tuning.")
+            return
+        if not hasattr(torch.cuda, "mem_get_info"):
+            print("[auto-gpu] torch.cuda.mem_get_info not available; skipping GPU tuning.")
+            return
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        free_gb = free_bytes / (1024 ** 3)
+        total_gb = total_bytes / (1024 ** 3)
+        adjustments: list[str] = []
+
+        new_batch = self.args.batch_size
+        for threshold, candidate in ((32, 36), (24, 28), (18, 24), (12, 16)):
+            if free_gb >= threshold and candidate > new_batch:
+                new_batch = candidate
+                break
+        if new_batch != self.args.batch_size:
+            adjustments.append(f"batch_size {self.args.batch_size} -> {new_batch}")
+            self.args.batch_size = new_batch
+
+        target_workers = min(max(os.cpu_count() or 4, 4), 8)
+        if free_gb >= 12 and self.args.workers < target_workers:
+            adjustments.append(f"workers {self.args.workers} -> {target_workers}")
+            self.args.workers = target_workers
+
+        if not self.args.prefetch_gpu:
+            self.args.prefetch_gpu = True
+            adjustments.append("prefetch_gpu=ON")
+
+        if not self.args.amp:
+            self.args.amp = True
+            adjustments.append("amp=ON")
+
+        if adjustments:
+            summary = ", ".join(adjustments)
+            print(f"[auto-gpu] Free {free_gb:.1f} GB / Total {total_gb:.1f} GB | applied: {summary}")
+        else:
+            print(f"[auto-gpu] Free {free_gb:.1f} GB / Total {total_gb:.1f} GB | no changes needed.")
 
     def _determine_in_channels(self) -> int:
         if self.args.k == 1 and self.args.imagenet_norm:
@@ -223,7 +371,7 @@ class UNet2DTrainer:
             factor=0.5,
             patience=8,
         )
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.args.amp)
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.args.amp)
 
     def _record_best(self, epoch: int, train_loss: float, val_loss: float, val_dice: float, val_iou: float, lr: float) -> None:
         self.best_snapshot = {
@@ -268,6 +416,12 @@ class UNet2DTrainer:
             gts=np.concatenate(gt_list, 0),
         )
 
+    def _append_epoch_log(self, line: str) -> None:
+        with self.epoch_log_path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        with self.aggregate_log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"[{self.out_dir.name}] {line}\n")
+
     def run(self) -> Dict[str, Any]:
         """Ch?y full training loop v? tr? th?ng tin k?t qu?."""
         t0 = time()
@@ -283,11 +437,13 @@ class UNet2DTrainer:
             lr = float(self.optimizer.param_groups[0]["lr"])
             elapsed = time() - t0
 
-            print(
+            log_line = (
                 f"Epoch {ep:03d}/{self.args.epochs} | "
                 f"train {train_loss:.4f} | val {val_loss:.4f} | "
                 f"dice {val_dice:.4f} | iou {val_iou:.4f} | lr {lr:.2e} | {elapsed:.1f}s"
             )
+            print(log_line)
+            self._append_epoch_log(log_line)
 
             if hasattr(self.logger, "log_epoch"):
                 self.logger.log_epoch(

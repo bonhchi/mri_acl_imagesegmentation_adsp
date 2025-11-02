@@ -4,7 +4,47 @@ from __future__ import annotations
 from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
-import segmentation_models_pytorch as smp
+try:
+    import segmentation_models_pytorch as smp  # type: ignore
+    _HAS_SMP = True
+except ModuleNotFoundError:  # pragma: no cover - runtime path
+    smp = None
+    _HAS_SMP = False
+
+
+def _binary_dice_loss(preds: torch.Tensor, targets: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    probs = torch.sigmoid(preds)
+    dims = (0, 2, 3)
+    inter = (probs * targets).sum(dims)
+    den = probs.sum(dims) + targets.sum(dims)
+    return 1 - (2 * inter + eps) / (den + eps)
+
+
+class _SoftBCEWithLogitsLoss(nn.Module):
+    """Fallback BCE loss when SMP is unavailable."""
+
+    def __init__(self):
+        super().__init__()
+        self.loss = nn.BCEWithLogitsLoss()
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        return self.loss(logits, targets)
+
+
+class _FocalLoss(nn.Module):
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        targets = targets.float()
+        pt = torch.where(targets == 1, probs, 1 - probs)
+        with torch.no_grad():
+            alpha_t = torch.where(targets == 1, self.alpha, 1 - self.alpha)
+        loss = -alpha_t * torch.pow(1 - pt, self.gamma) * torch.log(pt.clamp(min=1e-7))
+        return loss.mean()
 
 
 class TverskyLoss(nn.Module):
@@ -91,12 +131,21 @@ class LossManager(nn.Module):
         if self.classes == 1:
             # Binary
             if self.name in ("dice_bce", "bce_dice", "dice+bce"):
-                return nn.ModuleList([
-                    smp.losses.DiceLoss(mode="binary"),
-                    smp.losses.SoftBCEWithLogitsLoss(),
-                ])
+                if _HAS_SMP:
+                    dice_loss = smp.losses.DiceLoss(mode="binary")
+                else:
+                    class _DiceLoss(nn.Module):
+                        def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+                            return _binary_dice_loss(logits, targets)
+                    dice_loss = _DiceLoss()
+                bce_loss = (
+                    smp.losses.SoftBCEWithLogitsLoss() if _HAS_SMP else _SoftBCEWithLogitsLoss()
+                )
+                return nn.ModuleList([dice_loss, bce_loss])
             if self.name == "focal":
-                return smp.losses.FocalLoss(mode="binary", alpha=self.focal_alpha, gamma=self.focal_gamma)
+                if _HAS_SMP:
+                    return smp.losses.FocalLoss(mode="binary", alpha=self.focal_alpha, gamma=self.focal_gamma)
+                return _FocalLoss(alpha=self.focal_alpha, gamma=self.focal_gamma)
             if self.name == "tversky":
                 return TverskyLoss(self.tversky_alpha, self.tversky_beta)
             if self.name in ("focal_tversky", "focal-tversky"):
@@ -105,8 +154,25 @@ class LossManager(nn.Module):
         else:
             # Multiclass
             if self.name in ("dice_ce", "dice+ce", "ce_dice"):
+                if _HAS_SMP:
+                    dice_loss = smp.losses.DiceLoss(mode="multiclass")
+                else:
+                    class _MulticlassDice(nn.Module):
+                        def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+                            import torch.nn.functional as F
+                            probs = torch.softmax(logits, dim=1)
+                            targets = targets.long()
+                            one_hot = F.one_hot(targets, num_classes=probs.shape[1])
+                            one_hot = one_hot.permute(0, 3, 1, 2).float()
+                            dims = (0, 2, 3)
+                            inter = (probs * one_hot).sum(dim=dims)
+                            den = probs.sum(dim=dims) + one_hot.sum(dim=dims)
+                            eps = 1e-7
+                            dice = (2 * inter + eps) / (den + eps)
+                            return 1 - dice.mean()
+                    dice_loss = _MulticlassDice()
                 return nn.ModuleList([
-                    smp.losses.DiceLoss(mode="multiclass"),
+                    dice_loss,
                     nn.CrossEntropyLoss(),
                 ])
             if self.name in ("ce", "cross_entropy"):

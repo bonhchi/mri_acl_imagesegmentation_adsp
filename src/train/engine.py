@@ -24,7 +24,7 @@ class Engine:
         optimizer: torch.optim.Optimizer,
         loss_obj,
         logger=None,
-        scaler: Optional[torch.cuda.amp.GradScaler] = None,
+        scaler: Optional[torch.amp.GradScaler] = None,
     ):
         self.model = model.to(device)
         self.device = device
@@ -32,7 +32,7 @@ class Engine:
         self.optimizer = optimizer
         self.loss_obj = loss_obj
         self.logger = logger
-        self.scaler = scaler or torch.cuda.amp.GradScaler(enabled=cfg.get("amp", False))
+        self.scaler = scaler or torch.amp.GradScaler(enabled=cfg.get("amp", False))
         self.global_step = 0
 
         # optional
@@ -92,21 +92,64 @@ class Engine:
             if not torch.isfinite(loss):
                 raise RuntimeError(f"Non-finite loss at step {self.global_step}: {loss.item()}")
 
-            self.scaler.scale(loss).backward()
+            loss_value = float(loss.item())
+            try:
+                self.scaler.scale(loss).backward()
+            except RuntimeError as exc:
+                message = str(exc)
+                if (
+                    "CUDNN_STATUS_EXECUTION_FAILED" in message
+                    and amp_enabled
+                    and self.cfg.get("amp", False)
+                ):
+                    print(
+                        "[warn] cuDNN execution failed during AMP backward; disabling AMP and retrying this batch."
+                    )
+                    self.cfg["amp"] = False
+                    amp_enabled = False
+                    torch.cuda.empty_cache()
+                    self.scaler = torch.amp.GradScaler(enabled=False)
+
+                    self.optimizer.zero_grad(set_to_none=True)
+                    with torch.amp.autocast("cuda", enabled=False):
+                        logits = self.model(x)
+                        loss = compute_loss(self.loss_obj, logits, y)
+                    if not torch.isfinite(loss):
+                        raise RuntimeError(
+                            f"Non-finite loss encountered after AMP fallback at step {self.global_step}: {loss.item()}"
+                        ) from exc
+                    loss_value = float(loss.item())
+                    loss.backward()
+                    if self.max_grad_norm and self.max_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    self.optimizer.step()
+                    run += loss_value * x.size(0)
+
+                    if self.logger is not None and hasattr(self.logger, "log_step"):
+                        self.logger.log_step(
+                            global_step=self.global_step,
+                            epoch=epoch,
+                            lr=float(self.optimizer.param_groups[0]["lr"]),
+                            loss=loss_value,
+                        )
+                    self.global_step += 1
+                    continue
+                raise
+
             if self.max_grad_norm and self.max_grad_norm > 0:
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
-            run += float(loss.item()) * x.size(0)
+            run += loss_value * x.size(0)
 
             if self.logger is not None and hasattr(self.logger, "log_step"):
                 self.logger.log_step(
                     global_step=self.global_step,
                     epoch=epoch,
                     lr=float(self.optimizer.param_groups[0]["lr"]),
-                    loss=float(loss.item()),
+                    loss=loss_value,
                 )
             self.global_step += 1
 

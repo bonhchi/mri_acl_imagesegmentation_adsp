@@ -16,9 +16,11 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import os
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
+from time import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -27,15 +29,17 @@ from monai.losses import DiceCELoss
 from monai.networks.nets import UNet
 from torch.utils.data import DataLoader, Dataset
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+import sys
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from src.utils.listing import ListEntry, parse_list_file, summarise_entries
 
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
-
-
-def _read_list(txt_path: str) -> List[str]:
-    with open(txt_path, "r", encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip()]
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -65,7 +69,10 @@ def _compute_starts(dim: int, window: int, step: int) -> List[int]:
 class VolumePatchDataset3D(Dataset):
     """
     Patch-based dataset for 3D volumes stored in preprocessing artefacts.
+    Supports multiple caching strategies to balance RAM and VRAM usage.
     """
+
+    SUPPORTED_CACHE = {"cpu", "mmap", "none", "gpu"}
 
     def __init__(
         self,
@@ -77,12 +84,15 @@ class VolumePatchDataset3D(Dataset):
         patches_per_volume: int = 12,
         pos_fraction: float = 0.5,
         eval_stride: Optional[Tuple[int, int, int]] = None,
-        cache_volumes: bool = True,
+        cache_mode: str = "cpu",
         normalize: str = "volume",
     ) -> None:
-        self.files = _read_list(list_txt)
-        if not self.files:
+        self.entries: List[ListEntry] = parse_list_file(list_txt)
+        if not self.entries:
             raise ValueError(f"No NPZ files found in {list_txt}")
+
+        self.paths = [entry.path for entry in self.entries]
+        self.dataset_summary = summarise_entries(self.entries)
 
         self.patch_size = tuple(int(x) for x in patch_size)
         self.classes = max(int(classes), 1)
@@ -92,10 +102,18 @@ class VolumePatchDataset3D(Dataset):
         self.eval_stride = (
             tuple(int(max(1, s)) for s in eval_stride) if eval_stride is not None else None
         )
-        self.cache_volumes = bool(cache_volumes)
-        self.normalize = normalize.lower()
 
-        self._cache: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        cache = cache_mode.lower()
+        if cache not in self.SUPPORTED_CACHE:
+            raise ValueError(
+                f"Unsupported cache mode '{cache}'. Expected one of {self.SUPPORTED_CACHE}."
+            )
+        if cache == "gpu" and not torch.cuda.is_available():
+            raise RuntimeError("Cache mode 'gpu' requested but CUDA is not available.")
+        self.cache_mode = cache
+        self.normalize = normalize.lower()
+        self.device = torch.device("cuda") if self.cache_mode == "gpu" else torch.device("cpu")
+        self._cache: Dict[int, Tuple[Any, Any]] = {}
         self._indices: List[Tuple[int, Tuple[int, int, int]]] = []
 
         if self.mode != "train":
@@ -106,7 +124,7 @@ class VolumePatchDataset3D(Dataset):
     # ------------------------------------------------------------------ #
     def __len__(self) -> int:
         if self.mode == "train":
-            return len(self.files) * self.patches_per_volume
+            return len(self.paths) * self.patches_per_volume
         return len(self._indices)
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -118,22 +136,35 @@ class VolumePatchDataset3D(Dataset):
 
         img, mask = self._load_volume(file_idx)
         patch_img, patch_mask = self._extract_patch(img, mask, start)
-        x = torch.from_numpy(patch_img.copy()).float()
-        if self.classes == 1:
-            y = torch.from_numpy((patch_mask > 0).astype(np.float32)).unsqueeze(0)
+
+        if torch.is_tensor(patch_img):
+            x = patch_img.float()
         else:
-            y = torch.from_numpy(patch_mask.astype(np.int64))
-        return x, y
+            x = torch.from_numpy(np.ascontiguousarray(patch_img)).float()
+
+        if self.classes == 1:
+            if torch.is_tensor(patch_mask):
+                y = (patch_mask > 0).float().unsqueeze(0)
+            else:
+                y = torch.from_numpy((patch_mask > 0).astype(np.float32)).unsqueeze(0)
+        else:
+            if torch.is_tensor(patch_mask):
+                y = patch_mask.long()
+            else:
+                y = torch.from_numpy(patch_mask.astype(np.int64))
+
+        return x.contiguous(), y.contiguous()
 
     # ------------------------------------------------------------------ #
     # Volume handling
     # ------------------------------------------------------------------ #
-    def _load_volume(self, file_idx: int) -> Tuple[np.ndarray, np.ndarray]:
-        if self.cache_volumes and file_idx in self._cache:
+    def _load_volume(self, file_idx: int) -> Tuple[Any, Any]:
+        if self.cache_mode in {"cpu", "gpu"} and file_idx in self._cache:
             return self._cache[file_idx]
 
-        path = Path(self.files[file_idx])
-        with np.load(path) as data:
+        path = Path(self.paths[file_idx])
+        mmap_mode = "r" if self.cache_mode == "mmap" else None
+        with np.load(path, mmap_mode=mmap_mode) as data:
             img = data["img"].astype(np.float32)  # (S,1,H,W)
             mask = data["msk"].astype(np.int16)   # (S,H,W)
 
@@ -146,9 +177,14 @@ class VolumePatchDataset3D(Dataset):
             lo = float(img.min())
             hi = float(img.max())
             img = (img - lo) / (hi - lo + 1e-6)
-        # else: "none" -> keep as-is (already roughly z-scored by preprocess)
 
-        if self.cache_volumes:
+        if self.cache_mode == "gpu":
+            img_t = torch.from_numpy(img).to(self.device, non_blocking=True)
+            mask_t = torch.from_numpy(mask).to(self.device, non_blocking=True)
+            self._cache[file_idx] = (img_t, mask_t)
+            return img_t, mask_t
+
+        if self.cache_mode == "cpu":
             self._cache[file_idx] = (img, mask)
         return img, mask
 
@@ -156,42 +192,89 @@ class VolumePatchDataset3D(Dataset):
     # Patch sampling utilities
     # ------------------------------------------------------------------ #
     def _sample_train_start(self, file_idx: int) -> Tuple[int, int, int]:
-        img, mask = self._load_volume(file_idx)
-        depth, height, width = mask.shape
-        pd, ph, pw = self.patch_size
-
-        if self.pos_fraction > 0.0 and mask.max() > 0 and random.random() < self.pos_fraction:
-            coords = np.argwhere(mask > 0)
-            center = coords[np.random.randint(len(coords))]
+        _, mask = self._load_volume(file_idx)
+        if torch.is_tensor(mask):
+            depth, height, width = mask.shape
+            positive = (mask > 0).nonzero(as_tuple=False)
+            if (
+                self.pos_fraction > 0.0
+                and positive.numel() > 0
+                and random.random() < self.pos_fraction
+            ):
+                idx = int(torch.randint(0, positive.shape[0], (1,), device=positive.device).item())
+                center = positive[idx].cpu().numpy()
+            else:
+                center = np.array(
+                    [
+                        random.randrange(max(depth, 1)),
+                        random.randrange(max(height, 1)),
+                        random.randrange(max(width, 1)),
+                    ]
+                )
         else:
-            center = np.array(
-                [
-                    np.random.randint(0, max(depth, 1)),
-                    np.random.randint(0, max(height, 1)),
-                    np.random.randint(0, max(width, 1)),
-                ]
-            )
+            depth, height, width = mask.shape
+            if self.pos_fraction > 0.0 and mask.max() > 0 and random.random() < self.pos_fraction:
+                coords = np.argwhere(mask > 0)
+                center = coords[np.random.randint(len(coords))]
+            else:
+                center = np.array(
+                    [
+                        np.random.randint(0, max(depth, 1)),
+                        np.random.randint(0, max(height, 1)),
+                        np.random.randint(0, max(width, 1)),
+                    ]
+                )
 
-        start = center - np.array(self.patch_size) // 2
-        start = np.maximum(start, 0)
-        max_start = np.maximum(np.array([depth, height, width]) - np.array(self.patch_size), 0)
-        start = np.minimum(start, max_start)
-        return int(start[0]), int(start[1]), int(start[2])
+        pd, ph, pw = self.patch_size
+        z0 = max(0, int(center[0]) - pd // 2)
+        y0 = max(0, int(center[1]) - ph // 2)
+        x0 = max(0, int(center[2]) - pw // 2)
+        z0 = min(z0, max(0, depth - pd))
+        y0 = min(y0, max(0, height - ph))
+        x0 = min(x0, max(0, width - pw))
+        return z0, y0, x0
 
     def _extract_patch(
-        self, img: np.ndarray, mask: np.ndarray, start: Tuple[int, int, int]
-    ) -> Tuple[np.ndarray, np.ndarray]:
+        self,
+        img: Any,
+        mask: Any,
+        start: Tuple[int, int, int],
+    ) -> Tuple[Any, Any]:
         z0, y0, x0 = start
         pd, ph, pw = self.patch_size
-        z1 = min(z0 + pd, img.shape[1])
-        y1 = min(y0 + ph, img.shape[2])
-        x1 = min(x0 + pw, img.shape[3])
+        z1 = z0 + pd
+        y1 = y0 + ph
+        x1 = x0 + pw
+
+        if torch.is_tensor(img):
+            patch_img = torch.zeros((img.shape[0], pd, ph, pw), dtype=img.dtype, device=img.device)
+            patch_mask = torch.zeros((pd, ph, pw), dtype=mask.dtype, device=mask.device)
+            patch_img[:, : min(pd, img.shape[1] - z0), : min(ph, img.shape[2] - y0), : min(pw, img.shape[3] - x0)] = img[
+                :,
+                z0:min(z1, img.shape[1]),
+                y0:min(y1, img.shape[2]),
+                x0:min(x1, img.shape[3]),
+            ]
+            patch_mask[
+                : min(pd, mask.shape[0] - z0),
+                : min(ph, mask.shape[1] - y0),
+                : min(pw, mask.shape[2] - x0),
+            ] = mask[z0:min(z1, mask.shape[0]), y0:min(y1, mask.shape[1]), x0:min(x1, mask.shape[2])]
+            return patch_img, patch_mask
 
         patch_img = np.zeros((img.shape[0], pd, ph, pw), dtype=img.dtype)
         patch_mask = np.zeros((pd, ph, pw), dtype=mask.dtype)
-
-        patch_img[:, : z1 - z0, : y1 - y0, : x1 - x0] = img[:, z0:z1, y0:y1, x0:x1]
-        patch_mask[: z1 - z0, : y1 - y0, : x1 - x0] = mask[z0:z1, y0:y1, x0:x1]
+        patch_img[:, : min(pd, img.shape[1] - z0), : min(ph, img.shape[2] - y0), : min(pw, img.shape[3] - x0)] = img[
+            :,
+            z0:min(z1, img.shape[1]),
+            y0:min(y1, img.shape[2]),
+            x0:min(x1, img.shape[3]),
+        ]
+        patch_mask[
+            : min(pd, mask.shape[0] - z0),
+            : min(ph, mask.shape[1] - y0),
+            : min(pw, mask.shape[2] - x0),
+        ] = mask[z0:min(z1, mask.shape[0]), y0:min(y1, mask.shape[1]), x0:min(x1, mask.shape[2])]
         return patch_img, patch_mask
 
     def _build_eval_index(self) -> List[Tuple[int, Tuple[int, int, int]]]:
@@ -201,18 +284,83 @@ class VolumePatchDataset3D(Dataset):
             stride = self.eval_stride
 
         indices: List[Tuple[int, Tuple[int, int, int]]] = []
-        for fi in range(len(self.files)):
-            img, mask = self._load_volume(fi)
+        for i, _ in enumerate(self.paths):
+            _, mask = self._load_volume(i)
             depth, height, width = mask.shape
-            starts_z = _compute_starts(depth, self.patch_size[0], stride[0])
-            starts_y = _compute_starts(height, self.patch_size[1], stride[1])
-            starts_x = _compute_starts(width, self.patch_size[2], stride[2])
-            for z0 in starts_z:
-                for y0 in starts_y:
-                    for x0 in starts_x:
-                        indices.append((fi, (z0, y0, x0)))
+            starts_d = _compute_starts(depth, self.patch_size[0], stride[0])
+            starts_h = _compute_starts(height, self.patch_size[1], stride[1])
+            starts_w = _compute_starts(width, self.patch_size[2], stride[2])
+            for d in starts_d:
+                for h in starts_h:
+                    for w in starts_w:
+                        indices.append((i, (d, h, w)))
         return indices
 
+
+
+
+class DevicePrefetchLoader:
+    """Wrap a DataLoader to pre-stage batches on a target device."""
+
+    def __init__(self, loader: DataLoader, device: torch.device) -> None:
+        self.loader = loader
+        self.device = device
+
+    def __len__(self) -> int:
+        return len(self.loader)
+
+    @property
+    def dataset(self):
+        return self.loader.dataset
+
+    def __getattr__(self, item):
+        return getattr(self.loader, item)
+
+    def __iter__(self):
+        if self.device.type != "cuda":
+            yield from self.loader
+            return
+
+        stream = torch.cuda.Stream()
+        iterator = iter(self.loader)
+        next_batch = None
+
+        def _to_device(batch):
+            if isinstance(batch, (list, tuple)):
+                return type(batch)(
+                    item.to(self.device, non_blocking=True) if torch.is_tensor(item) else item
+                    for item in batch
+                )
+            if torch.is_tensor(batch):
+                return batch.to(self.device, non_blocking=True)
+            if isinstance(batch, dict):
+                return {
+                    k: (v.to(self.device, non_blocking=True) if torch.is_tensor(v) else v)
+                    for k, v in batch.items()
+                }
+            return batch
+
+        try:
+            next_batch = next(iterator)
+        except StopIteration:
+            return
+
+        with torch.cuda.stream(stream):
+            next_batch = _to_device(next_batch)
+
+        while True:
+            torch.cuda.current_stream().wait_stream(stream)
+            current = next_batch
+            try:
+                next_batch = next(iterator)
+            except StopIteration:
+                next_batch = None
+            if next_batch is not None:
+                with torch.cuda.stream(stream):
+                    next_batch = _to_device(next_batch)
+            yield current
+            if next_batch is None:
+                break
 
 # ---------------------------------------------------------------------------
 # Model helper
@@ -260,9 +408,11 @@ class UNet3DConfig:
     workers: int = 4
     amp: bool = True
     seed: int = 2024
-    cache_volumes: bool = True
+    cache_mode: str = "cpu"
     grad_clip: float = 5.0
     normalize: str = "volume"
+    prefetch_gpu: bool = False
+    auto_gpu: bool = False
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> UNet3DConfig:
@@ -285,16 +435,27 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> UNet3DConfig:
     parser.add_argument("--workers", type=int, default=4, help="Number of DataLoader workers.")
     parser.add_argument("--amp", action="store_true", help="Enable automatic mixed precision.")
     parser.add_argument("--seed", type=int, default=2024, help="Random seed.")
-    parser.add_argument("--cache-volumes", dest="cache_volumes", action="store_true", help="Cache volumes in RAM for faster patch sampling.")
-    parser.add_argument("--no-cache-volumes", dest="cache_volumes", action="store_false", help="Disable volume caching.")
+    parser.add_argument("--cache-mode", choices=["cpu", "mmap", "none", "gpu"], default="cpu", help="Caching strategy for volumes (cpu: RAM, mmap: on-disk views, none: reload per patch, gpu: store on VRAM).")
+    parser.add_argument("--cache-volumes", dest="cache_volumes", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-cache-volumes", dest="cache_volumes", action="store_false", help=argparse.SUPPRESS)
     parser.add_argument("--normalize", choices=["volume", "minmax", "none"], default="volume", help="Additional per-volume normalisation.")
     parser.add_argument("--grad-clip", type=float, default=5.0, help="Gradient clipping norm (<=0 to disable).")
-    parser.set_defaults(amp=True, cache_volumes=True)
+    parser.add_argument("--prefetch-gpu", action="store_true", help="Stage the next batch on GPU memory to reduce host RAM pressure.")
+    parser.add_argument(
+        "--auto-gpu",
+        action="store_true",
+        help="Heuristically consume more VRAM (enables amp/prefetch, increases batch size, upgrades cache mode when possible).",
+    )
+    parser.set_defaults(amp=True, cache_volumes=None)
     args = parser.parse_args(argv)
 
     overlap = float(np.clip(args.eval_overlap, 0.0, 0.9))
     patch = tuple(int(p) for p in args.patch_size)
     stride = tuple(max(1, int(round(p * (1.0 - overlap)))) for p in patch)
+
+    cache_mode = args.cache_mode.lower()
+    if args.cache_volumes is not None:
+        cache_mode = "cpu" if args.cache_volumes else "none"
 
     return UNet3DConfig(
         train_list=args.train_list,
@@ -315,10 +476,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> UNet3DConfig:
         workers=max(0, args.workers),
         amp=bool(args.amp),
         seed=args.seed,
-        cache_volumes=bool(args.cache_volumes),
+        cache_mode=cache_mode,
         grad_clip=args.grad_clip,
         normalize=args.normalize,
+        prefetch_gpu=bool(args.prefetch_gpu),
+        auto_gpu=bool(args.auto_gpu),
     )
+
 
 
 # ---------------------------------------------------------------------------
@@ -330,11 +494,37 @@ class UNet3DTrainer:
     def __init__(self, cfg: UNet3DConfig) -> None:
         self.cfg = cfg
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        if self.device.type != "cuda" and cfg.amp:
+            print("[warn] AMP requested but CUDA is unavailable; disabling mixed precision.")
+            cfg.amp = False
+
+        self.autocast_device = "cuda" if self.device.type == "cuda" else "cpu"
         self._set_seed(cfg.seed)
+
+        if getattr(cfg, "auto_gpu", False):
+            self._apply_auto_gpu_tweaks()
 
         self.out_dir = self._prepare_run_directory()
         self.cfg.out_dir = str(self.out_dir)
         self._dump_config()
+        start_stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.epoch_log_path = self.out_dir / "epoch_log.txt"
+        self.aggregate_log_path = self.out_dir.parent / "training_runs.log"
+        header = (
+            f"# Run {self.out_dir.name} | model=unet3d | epochs={cfg.epochs} | "
+            f"patch={cfg.patch_size} | started {start_stamp}\n"
+        )
+        with self.epoch_log_path.open("w", encoding="utf-8") as fh:
+            fh.write(header)
+        with self.aggregate_log_path.open("a", encoding="utf-8") as fh:
+            fh.write("\n" + header)
+
+        worker_count = cfg.workers
+        if cfg.cache_mode == "gpu" and cfg.workers > 0:
+            print("[warn] cache_mode=gpu enforces workers=0 to keep volume caches on device.")
+            worker_count = 0
+        cfg.workers = worker_count
 
         self.train_ds = VolumePatchDataset3D(
             cfg.train_list,
@@ -343,7 +533,7 @@ class UNet3DTrainer:
             mode="train",
             patches_per_volume=cfg.patches_per_volume,
             pos_fraction=cfg.pos_fraction,
-            cache_volumes=cfg.cache_volumes,
+            cache_mode=cfg.cache_mode,
             normalize=cfg.normalize,
         )
         self.val_ds = VolumePatchDataset3D(
@@ -352,25 +542,37 @@ class UNet3DTrainer:
             classes=cfg.classes,
             mode="val",
             eval_stride=cfg.eval_stride,
-            cache_volumes=cfg.cache_volumes,
+            cache_mode=cfg.cache_mode,
             normalize=cfg.normalize,
         )
 
-        self.train_loader = DataLoader(
+        print(f"[data] Train volumes: {self.train_ds.dataset_summary}")
+        print(f"[data] Val volumes:   {self.val_ds.dataset_summary}")
+
+        pin_setting = self.device.type == "cuda" and cfg.cache_mode != "gpu"
+
+        base_train_loader = DataLoader(
             self.train_ds,
             batch_size=cfg.batch_size,
             shuffle=True,
-            num_workers=cfg.workers,
-            pin_memory=True,
+            num_workers=worker_count,
+            pin_memory=pin_setting,
             drop_last=True,
         )
-        self.val_loader = DataLoader(
+        base_val_loader = DataLoader(
             self.val_ds,
             batch_size=cfg.val_batch_size,
             shuffle=False,
-            num_workers=cfg.workers,
-            pin_memory=True,
+            num_workers=worker_count,
+            pin_memory=pin_setting,
         )
+
+        if cfg.prefetch_gpu and self.device.type == "cuda":
+            self.train_loader = DevicePrefetchLoader(base_train_loader, self.device)
+            self.val_loader = DevicePrefetchLoader(base_val_loader, self.device)
+        else:
+            self.train_loader = base_train_loader
+            self.val_loader = base_val_loader
 
         out_channels = 1 if cfg.classes == 1 else cfg.classes
         self.model = build_unet3d(
@@ -395,7 +597,17 @@ class UNet3DTrainer:
             patience=6,
             factor=0.5,
         )
-        self.scaler = torch.cuda.amp.GradScaler(enabled=cfg.amp)
+        if cfg.amp:
+            try:
+                self.scaler = torch.amp.GradScaler(device_type=self.autocast_device, enabled=True)
+            except TypeError:
+                # Fallback for older PyTorch versions.
+                self.scaler = torch.cuda.amp.GradScaler(enabled=True)
+        else:
+            try:
+                self.scaler = torch.amp.GradScaler(enabled=False)
+            except TypeError:
+                self.scaler = torch.cuda.amp.GradScaler(enabled=False)
 
         self.best_metric = float("inf")
         self.best_snapshot: Dict[str, Any] = {}
@@ -406,6 +618,60 @@ class UNet3DTrainer:
         if not self.log_path.exists():
             with self.log_path.open("w", encoding="utf-8") as fh:
                 fh.write("epoch,train_loss,train_dice,val_loss,val_dice,lr\n")
+
+    def _apply_auto_gpu_tweaks(self) -> None:
+        cfg = self.cfg
+        if self.device.type != "cuda":
+            print("[auto-gpu] CUDA unavailable; skipping GPU tuning for 3D runner.")
+            cfg.auto_gpu = False
+            return
+        if not hasattr(torch.cuda, "mem_get_info"):
+            print("[auto-gpu] torch.cuda.mem_get_info not available; skipping GPU tuning.")
+            cfg.auto_gpu = False
+            return
+
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        free_gb = free_bytes / (1024 ** 3)
+        total_gb = total_bytes / (1024 ** 3)
+        adjustments: List[str] = []
+
+        if free_gb >= 28 and cfg.cache_mode != "gpu":
+            adjustments.append(f"cache_mode {cfg.cache_mode} -> gpu")
+            cfg.cache_mode = "gpu"
+        elif free_gb >= 16 and cfg.cache_mode == "cpu":
+            adjustments.append("cache_mode cpu -> mmap")
+            cfg.cache_mode = "mmap"
+
+        new_batch = cfg.batch_size
+        for threshold, candidate in ((40, 6), (30, 4), (22, 3)):
+            if free_gb >= threshold and candidate > new_batch:
+                new_batch = candidate
+        if new_batch != cfg.batch_size:
+            adjustments.append(f"batch_size {cfg.batch_size} -> {new_batch}")
+            cfg.batch_size = new_batch
+            target_val = max(cfg.val_batch_size, max(1, new_batch // 2))
+            if target_val != cfg.val_batch_size:
+                adjustments.append(f"val_batch_size {cfg.val_batch_size} -> {target_val}")
+                cfg.val_batch_size = target_val
+
+        target_workers = min(max(os.cpu_count() or 4, 4), 8)
+        if cfg.cache_mode != "gpu" and free_gb >= 16 and cfg.workers < target_workers:
+            adjustments.append(f"workers {cfg.workers} -> {target_workers}")
+            cfg.workers = target_workers
+
+        if not cfg.prefetch_gpu:
+            cfg.prefetch_gpu = True
+            adjustments.append("prefetch_gpu=ON")
+
+        if not cfg.amp:
+            cfg.amp = True
+            adjustments.append("amp=ON")
+
+        if adjustments:
+            summary = ", ".join(adjustments)
+            print(f"[auto-gpu] Free {free_gb:.1f} GB / Total {total_gb:.1f} GB | applied: {summary}")
+        else:
+            print(f"[auto-gpu] Free {free_gb:.1f} GB / Total {total_gb:.1f} GB | no changes needed.")
 
     # ------------------------------------------------------------------ #
     # Training utilities
@@ -435,6 +701,12 @@ class UNet3DTrainer:
     def _dump_config(self) -> None:
         with (self.out_dir / "args.json").open("w", encoding="utf-8") as fh:
             json.dump(asdict(self.cfg), fh, indent=2)
+
+    def _append_epoch_log(self, line: str) -> None:
+        with self.epoch_log_path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        with self.aggregate_log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"[{self.out_dir.name}] {line}\n")
 
     # ------------------------------------------------------------------ #
     # Metrics
@@ -473,22 +745,36 @@ class UNet3DTrainer:
         self.model.train()
         total_loss = 0.0
         total_dice = 0.0
+        processed = 0
         for x, y in self.train_loader:
             x = x.to(self.device)
             y = y.to(self.device)
             self.optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=self.cfg.amp):
+            with torch.amp.autocast(self.autocast_device, enabled=self.cfg.amp):
                 logits = self.model(x)
                 loss = self.criterion(logits, y)
-            self.scaler.scale(loss).backward()
-            if self.cfg.grad_clip > 0:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            if not torch.isfinite(loss):
+                loss_value = float(loss.detach().item())
+                print(f"[warn] Non-finite train loss (value={loss_value:.4f}) detected, skipping batch.")
+                if self.cfg.amp:
+                    self.scaler.update()
+                continue
+            if self.cfg.amp:
+                self.scaler.scale(loss).backward()
+                if self.cfg.grad_clip > 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                if self.cfg.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
+                self.optimizer.step()
             total_loss += float(loss.item())
             total_dice += self._batch_dice(logits.detach(), y)
-        n = max(1, len(self.train_loader))
+            processed += 1
+        n = max(1, processed)
         return total_loss / n, total_dice / n
 
     @torch.no_grad()
@@ -496,32 +782,43 @@ class UNet3DTrainer:
         self.model.eval()
         total_loss = 0.0
         total_dice = 0.0
+        processed = 0
         for x, y in self.val_loader:
             x = x.to(self.device)
             y = y.to(self.device)
-            with torch.cuda.amp.autocast(enabled=self.cfg.amp):
+            with torch.amp.autocast(self.autocast_device, enabled=self.cfg.amp):
                 logits = self.model(x)
                 loss = self.criterion(logits, y)
+            if not torch.isfinite(loss):
+                loss_value = float(loss.detach().item())
+                print(f"[warn] Non-finite val loss (value={loss_value:.4f}) detected, skipping batch.")
+                continue
             total_loss += float(loss.item())
             total_dice += self._batch_dice(logits, y)
-        n = max(1, len(self.val_loader))
+            processed += 1
+        n = max(1, processed)
         return total_loss / n, total_dice / n
 
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
     def fit(self) -> Dict[str, Any]:
+        t0 = time()
         for epoch in range(1, self.cfg.epochs + 1):
             train_loss, train_dice = self._train_one_epoch()
             val_loss, val_dice = self._validate()
             lr = float(self.optimizer.param_groups[0]["lr"])
             self.scheduler.step(val_loss)
 
-            print(
+            elapsed = time() - t0
+            log_line = (
                 f"Epoch {epoch:03d}/{self.cfg.epochs} | "
                 f"train {train_loss:.4f} | val {val_loss:.4f} | "
-                f"dice {val_dice:.4f} | lr {lr:.2e}"
+                f"dice {val_dice:.4f} | train_dice {train_dice:.4f} | "
+                f"lr {lr:.2e} | {elapsed:.1f}s"
             )
+            print(log_line)
+            self._append_epoch_log(log_line)
 
             with self.log_path.open("a", encoding="utf-8") as fh:
                 fh.write(f"{epoch},{train_loss:.6f},{train_dice:.6f},{val_loss:.6f},{val_dice:.6f},{lr:.6e}\n")

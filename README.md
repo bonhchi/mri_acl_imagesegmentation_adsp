@@ -31,14 +31,14 @@ PY
 
 ## 2. Cấu trúc thư mục
 
-| Thư mục   | Vai trò                                                     |
-|-----------|-------------------------------------------------------------|
-| `artifacts/` | Kết quả preprocess (`volume.npz`, `tensor.pt`, preview) |
+| Thư mục      | Vai trò                                                     |
+| ------------ | ----------------------------------------------------------- |
+| `artifacts/` | Kết quả preprocess (`volume.npz`, `tensor.pt`, `preview`, `preview_mask`) |
 | `dataset/`   | Dữ liệu thô (fastMRI `.h5`, KneeMRI `.pck`, OAI-ZIB `.npz`) |
-| `lists/`     | `train.txt`, `val.txt` sử dụng khi train                 |
-| `runs/`      | Checkpoint (`best.pt`), lịch sử, ảnh mẫu                  |
-| `src/`       | Mã nguồn adapters, preprocess, training, inference       |
-| `.env`       | (tùy chọn) Khai báo `FASTMRI_ROOT`, `KNEE_MRI_ROOT`, ... |
+| `lists/`     | `train.txt`, `val.txt` sử dụng khi train                    |
+| `runs/`      | Checkpoint (`best.pt`), lịch sử, ảnh mẫu                    |
+| `src/`       | Mã nguồn adapters, preprocess, training, inference          |
+| `.env`       | (tùy chọn) Khai báo `FASTMRI_ROOT`, `KNEE_MRI_ROOT`, ...    |
 
 ## 3. Tiền xử lý dữ liệu
 
@@ -98,6 +98,8 @@ pathlib.Path("lists/val.txt").write_text("\n".join(L[k:]), encoding="utf-8")
 PY
 ```
 
+> Lưu ý: sau khi tạo, nên thêm tiền tố `dataset|` cho mỗi dòng (ví dụ `fastmri|D:\...\volume.npz`) hoặc dùng `python src/generate_train_val.py` để sinh đúng định dạng mới.
+
 ## 5. Huấn luyện U-Net 2D/2.5D
 
 ### Pipeline đầy đủ
@@ -120,30 +122,43 @@ python src/train_unet_launcher.py `
 python src/train_unet_launcher.py `
   --dataset fastmri `
   --artifact-dir artifacts/fastmri_knee `
-  --train-list lists/train.txt `
-  --val-list lists/val.txt `
+  --train-list lists/fastmri_knee/train.txt `
+  --val-list lists/fastmri_knee/val.txt `
   --skip-preprocess `
   --skip-split `
+  --prefetch-gpu `
   --epochs 80
 ```
 
-Tùy chọn thường dùng: `--skip-preprocess`, `--skip-split`, `--model unetpp`, `--encoder densenet121`, `--run-tag exp1`.
+Tùy chọn thường dùng: `--skip-preprocess`, `--skip-split`, `--model unetpp`, `--encoder densenet121`, `--prefetch-gpu`, `--cache-mode cpu`, `--auto-gpu`, `--run-tag exp1`.
+Nếu GPU còn ≥12GB VRAM, `--auto-gpu` sẽ tự bật mixed precision, prefetch và tăng batch size/worker để tận dụng tài nguyên; khi VRAM thấp hơn cấu hình sẽ giữ nguyên. Khi dữ liệu nằm trên ổ đĩa chậm, cân nhắc `--cache-mode cpu` để giữ volume trong RAM (cần thêm RAM trống).
 
 ## 6. Huấn luyện U-Net 3D
 
 ```powershell
 python src/train/train_unet3d.py `
-  --train-list lists/train.txt `
-  --val-list lists/val.txt `
+  --train-list lists/fastmri_knee/train.txt `
+  --val-list lists/fastmri_knee/val.txt `
   --out-dir runs/unet3d `
   --patch-size 160 160 64 `
   --patches-per-volume 12 `
   --batch-size 2 `
   --epochs 80 `
+  --cache-mode gpu `
+  --prefetch-gpu `
   --amp
 ```
 
-Tùy chọn: `--pos-frac`, `--eval-overlap`, `--channels`, `--normalize`, `--run-tag`.
+Ghi chú: list/\*.txt nên gắn nhãn `dataset|path`. Nếu thiếu, loader vẫn suy ra từ đường dẫn nhưng nên chuẩn hóa để kết hợp nhiều nguồn.
+
+Các tùy chọn đáng lưu ý: `--pos-frac`, `--eval-overlap`, `--channels`, `--normalize`, `--cache-mode {cpu|mmap|none|gpu}`, `--auto-gpu`, `--prefetch-gpu`, `--run-tag`.
+Hiệu năng:
+
+- GPU: `--cache-mode gpu` giữ volume trên VRAM, nhanh hơn nhưng tốn bộ nhớ, DataLoader sẽ ép `workers=0`.
+- RAM: Dùng `cpu` hoặc `mmap` khi RAM thấp; cân nhắc bỏ `--prefetch-gpu`.
+- CPU/disk: `none` phù hợp khi có NVMe nhanh, đổi lại CPU cao hơn.
+
+Khi GPU còn trống ≥28GB VRAM, `--auto-gpu` sẽ tự chuyển `cache_mode=gpu`, tăng batch size + val batch, bật prefetch và giữ worker hợp lý. Nếu VRAM thấp hơn, cấu hình được giữ nguyên để tránh thiếu bộ nhớ.
 
 ## 7. Theo dõi & Checkpoints
 

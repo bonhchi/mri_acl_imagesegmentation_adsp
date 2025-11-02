@@ -40,3 +40,8 @@ artifacts/**/*.png
 # Train/val list tu dong sinh
 lists/train.txt
 lists/val.txt
+
+runs/
+**/best.pt
+**/last_full.pt
+

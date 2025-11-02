@@ -121,12 +121,16 @@ def save_pack(out_dir: str, pack: Dict, preview_max: int = 8):
     # 3) một số preview PNG để QA
     prev = pack["preview"]  # (S,H,W) ∈ [0,1]
     pv_dir = os.path.join(out_dir, "preview")
+    pv_mask_dir = os.path.join(out_dir, "preview_mask")
     os.makedirs(pv_dir, exist_ok=True)
+    os.makedirs(pv_mask_dir, exist_ok=True)
     S = prev.shape[0]
     take = min(preview_max, S)
     for i in range(take):
         fname = f"slice_{pack['indices'][i]:03d}.png"
         iio.imwrite(os.path.join(pv_dir, fname), (prev[i] * 255).astype(np.uint8))
+        mask_png = (pack["mask"][i] > 0).astype(np.uint8) * 255
+        iio.imwrite(os.path.join(pv_mask_dir, fname), mask_png)
 
     # 4) thống kê QC nhanh (mean/std trong mask)
     img_z = tensor[:, 0].numpy()     # (S,H,W)

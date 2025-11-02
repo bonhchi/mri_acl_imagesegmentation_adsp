@@ -16,6 +16,7 @@ from src.adapters.fastmri_adapter import FastMRISinglecoilAdapter  # type: ignor
 from src.adapters.knee_mri_adapter import KneeMRIVolumeAdapter  # type: ignore
 from src.adapters.oai_zib_adapter import OAIZibVolumeAdapter  # type: ignore
 from src.main import build_preprocess  # type: ignore
+from src.utils.listing import format_list_entries
 
 
 _DATASET_ENV_KEYS = {
@@ -137,6 +138,7 @@ def generate_split(
     list_dir: Path,
     ratio: float,
     seed: int,
+    dataset_label: Optional[str] = None,
 ) -> Tuple[Path, Path]:
     npz_files = collect_npz(artifact_dir)
     if not npz_files:
@@ -158,8 +160,11 @@ def generate_split(
     train_path = list_dir / "train.txt"
     val_path = list_dir / "val.txt"
 
-    train_path.write_text("\n".join(str(p) for p in train_files), encoding="utf-8")
-    val_path.write_text("\n".join(str(p) for p in val_files), encoding="utf-8")
+    train_lines = format_list_entries(train_files, dataset_label)
+    val_lines = format_list_entries(val_files, dataset_label)
+
+    train_path.write_text("\n".join(train_lines), encoding="utf-8")
+    val_path.write_text("\n".join(val_lines), encoding="utf-8")
 
     print(f"[step] Wrote train list ({len(train_files)} entries) -> {train_path}")
     print(f"[step] Wrote val list ({len(val_files)} entries) -> {val_path}")
@@ -196,6 +201,9 @@ def run_training(train_list: Path, val_list: Path, out_dir: Path, args: argparse
         logger=args.logger,
         save_val_probs=args.save_val_probs,
         max_grad_norm=args.max_grad_norm,
+        prefetch_gpu=args.prefetch_gpu,
+        cache_mode=args.cache_mode,
+        auto_gpu=args.auto_gpu,
         amp=args.amp,
         seed=args.seed,
         run_tag=run_tag_value,
@@ -344,6 +352,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Logger backend(s). Accepts 'noop', 'csv', 'tensorboard', or a '+'-joined combination such as 'csv+tensorboard'.",
     )
     parser.add_argument(
+        "--cache-mode",
+        default="none",
+        choices=["none", "cpu"],
+        help="Caching strategy for 2D NPZ volumes (none: reload each access, cpu: keep full volumes in RAM).",
+    )
+    parser.add_argument(
         "--save-val-probs",
         action="store_true",
         help="Persist validation probabilities to disk.",
@@ -353,6 +367,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="Gradient clipping norm.",
+    )
+    parser.add_argument(
+        "--prefetch-gpu",
+        action="store_true",
+        help="Stage DataLoader batches on GPU memory before each step.",
+    )
+    parser.add_argument(
+        "--auto-gpu",
+        action="store_true",
+        help="Enable heuristic GPU utilisation tuning for training (turns on amp/prefetch and raises batch size when VRAM permits).",
     )
     parser.add_argument("--seed", type=int, default=2024, help="Training seed.")
     parser.add_argument(
@@ -461,6 +485,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 list_dir,
                 args.split_ratio,
                 args.split_seed,
+                dataset_label=args.dataset,
             )
 
     train_list = (

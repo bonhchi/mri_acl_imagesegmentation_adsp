@@ -6,9 +6,11 @@ Trả về từng lát 2D (k=1) hoặc 2.5D (k odd: 3,5,...) theo dạng CHW + m
 Nếu muốn dùng pretrained ImageNet: bật imagenet_norm -> replicate về 3 kênh (k==1) và normalize theo encoder.
 """
 from __future__ import annotations
+from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from src.utils.listing import ListEntry, parse_list_file, summarise_entries
 
 try:
     import albumentations as A
@@ -16,10 +18,10 @@ try:
 except Exception:
     A, ToTensorV2 = None, None
 
-
-def _read_list(txt_path: str):
-    with open(txt_path, "r", encoding="utf-8") as f:
-        return [ln.strip() for ln in f if ln.strip()]
+try:
+    import cv2  # type: ignore
+except Exception:  # pragma: no cover
+    cv2 = None
 
 
 def _build_aug(level: str):
@@ -30,13 +32,29 @@ def _build_aug(level: str):
     if level == "light":
         return A.Compose([
             A.HorizontalFlip(p=0.5),
-            A.ShiftScaleRotate(shift_limit=0.03, scale_limit=0.05, rotate_limit=10, p=0.5, border_mode=0),
+            A.Affine(
+                translate_percent={"x": (-0.03, 0.03), "y": (-0.03, 0.03)},
+                scale=(0.95, 1.05),
+                rotate=(-10, 10),
+                mode=cv2.BORDER_CONSTANT if cv2 is not None else 0,
+                cval=0,
+                fit_output=False,
+                p=0.5,
+            ),
             ToTensorV2(transpose_mask=True),
         ])
     return A.Compose([
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.1),
-        A.ShiftScaleRotate(0.05, 0.10, 15, p=0.7, border_mode=0),
+        A.Affine(
+            translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
+            scale=(0.90, 1.10),
+            rotate=(-15, 15),
+            mode=cv2.BORDER_CONSTANT if cv2 is not None else 0,
+            cval=0,
+            fit_output=False,
+            p=0.7,
+        ),
         ToTensorV2(transpose_mask=True),
     ])
 
@@ -47,14 +65,28 @@ class KneeNPZ2DSlices(Dataset):
     k: 1=2D, 3/5=2.5D (stack láng giềng làm kênh)
     imagenet_norm: nếu True -> replicate 1->3 kênh (k==1) và normalize theo encoder
     """
-    def __init__(self, list_txt: str, k: int = 1, aug: str = "light",
-                 imagenet_norm: bool = False, encoder_name: str = "resnet34"):
-        assert k >= 1 and k % 2 == 1, "k phải là số lẻ (1,3,5,...)"
-        self.files = _read_list(list_txt)
+    def __init__(
+        self,
+        list_txt: str,
+        k: int = 1,
+        aug: str = "light",
+        imagenet_norm: bool = False,
+        encoder_name: str = "resnet34",
+        cache_mode: str = "none",
+    ):
+        assert k >= 1 and k % 2 == 1, "k must be odd (1,3,5,...)"
+        self.entries: list[ListEntry] = parse_list_file(list_txt)
+        if not self.entries:
+            raise ValueError(f"No NPZ files found in {list_txt}")
+
+        self.files = [Path(entry.path) for entry in self.entries]
+        self.dataset_summary = summarise_entries(self.entries)
         self.k = k
         self.aug = _build_aug(aug)
         self.imagenet_norm = imagenet_norm
         self.encoder_name = encoder_name
+        self.cache_mode = (cache_mode or "none").lower()
+        self._cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
         # build index (file_idx, slice_idx)
         self.index = []
@@ -75,10 +107,14 @@ class KneeNPZ2DSlices(Dataset):
         return len(self.index)
 
     def _load_volume(self, file_idx: int):
+        if self.cache_mode == "cpu" and file_idx in self._cache:
+            return self._cache[file_idx]
         path = self.files[file_idx]
-        z = np.load(path)
-        x = z["img"].astype(np.float32)  # (S,1,H,W)
-        y = z["msk"].astype(np.int64)    # (S,H,W)
+        with np.load(path) as z:
+            x = z["img"].astype(np.float32)  # (S,1,H,W)
+            y = z["msk"].astype(np.int64)    # (S,H,W)
+        if self.cache_mode == "cpu":
+            self._cache[file_idx] = (x, y)
         return x, y
 
     def __getitem__(self, i: int):
