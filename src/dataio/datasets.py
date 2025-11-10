@@ -7,6 +7,7 @@ Nếu muốn dùng pretrained ImageNet: bật imagenet_norm -> replicate về 3 
 """
 from __future__ import annotations
 from pathlib import Path
+import inspect
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -27,16 +28,52 @@ except Exception:  # pragma: no cover
 def _build_aug(level: str):
     if A is None:
         return None
+
+    def _make_affine(**kwargs):
+        params = getattr(_make_affine, "_params", None)
+        if params is None:
+            params = inspect.signature(A.Affine.__init__).parameters
+            setattr(_make_affine, "_params", params)
+
+        mapped = {}
+        for key, value in kwargs.items():
+            if key in params:
+                mapped[key] = value
+                continue
+            if key == "mode":
+                if "border_mode" in params:
+                    mapped["border_mode"] = value
+                elif "mode" in params:
+                    mapped["mode"] = value
+                continue
+            if key == "cval":
+                if "value" in params:
+                    mapped["value"] = value
+                elif "fill_value" in params:
+                    mapped["fill_value"] = value
+                elif "cval" in params:
+                    mapped["cval"] = value
+                continue
+        base_cval = kwargs.get("cval", 0)
+        if "mask_value" in params and "mask_value" not in mapped:
+            mapped["mask_value"] = base_cval
+        if "mask_fill_value" in params and "mask_fill_value" not in mapped:
+            mapped["mask_fill_value"] = base_cval
+        if "cval_mask" in params and "cval_mask" not in mapped:
+            mapped["cval_mask"] = base_cval
+        return A.Affine(**mapped)
+
+    border_value = cv2.BORDER_CONSTANT if cv2 is not None else 0
     if level == "none":
         return A.Compose([ToTensorV2(transpose_mask=True)])
     if level == "light":
         return A.Compose([
             A.HorizontalFlip(p=0.5),
-            A.Affine(
+            _make_affine(
                 translate_percent={"x": (-0.03, 0.03), "y": (-0.03, 0.03)},
                 scale=(0.95, 1.05),
                 rotate=(-10, 10),
-                mode=cv2.BORDER_CONSTANT if cv2 is not None else 0,
+                mode=border_value,
                 cval=0,
                 fit_output=False,
                 p=0.5,
@@ -46,11 +83,11 @@ def _build_aug(level: str):
     return A.Compose([
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.1),
-        A.Affine(
+        _make_affine(
             translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
             scale=(0.90, 1.10),
             rotate=(-15, 15),
-            mode=cv2.BORDER_CONSTANT if cv2 is not None else 0,
+            mode=border_value,
             cval=0,
             fit_output=False,
             p=0.7,

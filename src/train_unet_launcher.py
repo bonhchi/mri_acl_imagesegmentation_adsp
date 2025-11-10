@@ -202,6 +202,8 @@ def run_training(train_list: Path, val_list: Path, out_dir: Path, args: argparse
         save_val_probs=args.save_val_probs,
         max_grad_norm=args.max_grad_norm,
         prefetch_gpu=args.prefetch_gpu,
+        prefetch_factor=args.prefetch_factor,
+        persistent_workers=args.persistent_workers,
         cache_mode=args.cache_mode,
         auto_gpu=args.auto_gpu,
         amp=args.amp,
@@ -374,6 +376,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stage DataLoader batches on GPU memory before each step.",
     )
     parser.add_argument(
+        "--prefetch-factor",
+        type=int,
+        default=2,
+        help="Number of batches each worker preloads (requires workers > 0).",
+    )
+    parser.add_argument(
+        "--persistent-workers",
+        action="store_true",
+        help="Keep DataLoader workers alive between epochs to cut fork overhead.",
+    )
+    parser.add_argument(
         "--auto-gpu",
         action="store_true",
         help="Enable heuristic GPU utilisation tuning for training (turns on amp/prefetch and raises batch size when VRAM permits).",
@@ -420,7 +433,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if dataset_root is not None:
             dataset_root = dataset_root.resolve()
     if dataset_root is not None and not dataset_root.exists():
-        print(f"[warn] Dataset root {dataset_root} does not exist; treating as unavailable.")
+        if not args.skip_preprocess:
+            print(f"[warn] Dataset root {dataset_root} does not exist; treating as unavailable.")
         dataset_root = None
     args.dataset_root = dataset_root
 

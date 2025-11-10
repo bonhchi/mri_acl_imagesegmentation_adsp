@@ -69,7 +69,7 @@ python src/train_unet_launcher.py `
 python src/train_unet_launcher.py `
   --dataset oaizib `
   --dataset-root dataset/OAI-ZIB-framelast `
-  --artifact-dir artifacts/oaizib_knee `
+  --artifact-dir artifacts/artifacts/oaizib_knee `
   --skip-split `
   --skip-train
 ```
@@ -116,21 +116,34 @@ python src/train_unet_launcher.py `
   --amp
 ```
 
-### Huấn luyện với danh sách có sẵn
+### Huấn luyện OAI-ZIB với danh sách đã chuẩn bị
 
 ```powershell
 python src/train_unet_launcher.py `
-  --dataset fastmri `
-  --artifact-dir artifacts/fastmri_knee `
-  --train-list lists/fastmri_knee/train.txt `
-  --val-list lists/fastmri_knee/val.txt `
+  --dataset oaizib `
+  --artifact-dir artifacts/artifacts/oaizib_knee `
+  --train-list lists/oaizib_knee/train.txt `
+  --val-list lists/oaizib_knee/val.txt `
   --skip-preprocess `
   --skip-split `
+  --out-dir runs/oaizib_unet `
+  --epochs 80 `
+  --batch-size 64 `
+  --workers 8 `
+  --run-tag oaizib `
   --prefetch-gpu `
-  --epochs 80
+  --prefetch-factor 4 `
+  --persistent-workers `
+  --cache-mode cpu `
+  --amp
 ```
 
-Tùy chọn thường dùng: `--skip-preprocess`, `--skip-split`, `--model unetpp`, `--encoder densenet121`, `--prefetch-gpu`, `--cache-mode cpu`, `--auto-gpu`, `--run-tag exp1`.
+> Ghi chú:
+> - `--skip-preprocess` và `--skip-split` chỉ dùng khi `volume.npz` và danh sách train/val đã tạo từ bước 3-4.
+> - `--cache-mode cpu` hữu ích khi artifact đặt trên HDD; có thể đổi sang `mmap` hoặc `gpu` nếu phần cứng cho phép.
+> - `--prefetch-gpu` tăng tốc độ nạp batch khi VRAM còn trống; đi kèm `--prefetch-factor 4` và `--persistent-workers` để giảm thời gian chờ DataLoader.
+
+Tùy chọn thường dùng: `--skip-preprocess`, `--skip-split`, `--model unetpp`, `--encoder densenet121`, `--prefetch-gpu`, `--prefetch-factor 4`, `--persistent-workers`, `--cache-mode cpu`, `--auto-gpu`, `--run-tag exp1`.
 Nếu GPU còn ≥12GB VRAM, `--auto-gpu` sẽ tự bật mixed precision, prefetch và tăng batch size/worker để tận dụng tài nguyên; khi VRAM thấp hơn cấu hình sẽ giữ nguyên. Khi dữ liệu nằm trên ổ đĩa chậm, cân nhắc `--cache-mode cpu` để giữ volume trong RAM (cần thêm RAM trống).
 
 ## 6. Huấn luyện U-Net 3D

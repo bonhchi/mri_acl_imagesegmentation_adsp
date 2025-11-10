@@ -54,7 +54,7 @@ HƯỚNG DẪN LÀM VIỆC (TIẾNG VIỆT)
     python src/train_unet_launcher.py ^
       --dataset oaizib ^
       --dataset-root dataset/OAI-ZIB-framelast ^
-      --artifact-dir artifacts/oaizib_knee ^
+      --artifact-dir artifacts/artifacts/oaizib_knee ^
       --skip-split ^
       --skip-train
 
@@ -91,29 +91,29 @@ Chạy end-to-end (preprocess + split + train):
       --workers 4 ^
       --amp
 
-Huấn luyện trên dữ liệu đã có list:
+Huấn luyện OAI-ZIB với danh sách đã chuẩn bị (khuyến nghị hiện tại):
     python src/train_unet_launcher.py ^
-      --dataset fastmri ^
-      --dataset-root dataset/kneemri^
-      --artifact-dir artifacts/kneemri_acl ^
-      --out-dir runs/kneemri_unet ^
-      --epochs 120 ^
-      --batch-size 96 ^
-      --workers 16 ^
+      --dataset oaizib ^
+      --artifact-dir artifacts/artifacts/oaizib_knee ^
+      --train-list lists/oaizib_knee/train.txt ^
+      --val-list lists/oaizib_knee/val.txt ^
+      --skip-preprocess ^
+      --skip-split ^
+      --out-dir runs/oaizib_unet ^
+      --epochs 80 ^
+      --batch-size 64 ^
+      --workers 8 ^
+      --run-tag oaizib ^
+      --prefetch-gpu ^
+      --prefetch-factor 4 ^
+      --persistent-workers ^
+      --cache-mode cpu ^
       --amp
 
-Train san sẻ tài nguyên CPU + GPU
-python src/train/train_unet3d.py ^
-    --train-list lists/train.txt ^
-    --val-list lists/val.txt ^
-    --out-dir runs/unet3d ^
-    --patch-size 160 160 64 ^
-    --patches-per-volume 12 ^
-    --batch-size 2 ^
-    --cache-mode cpu ^
-    --prefetch-gpu ^
-    --epochs 5
-    --amp
+Ghi chú:
+- `--skip-preprocess` và `--skip-split` dùng khi `volume.npz` cùng danh sách train/val đã tạo ở bước 3 và 4.
+- `--cache-mode cpu` phù hợp khi artifact nằm trên HDD, cần sẵn RAM trống; có thể chuyển sang `mmap` hoặc `gpu` tùy cấu hình.
+- `--prefetch-gpu` giúp giảm độ trễ nạp batch khi VRAM còn đủ; kết hợp `--prefetch-factor 4` và `--persistent-workers` giảm thời gian chờ giữa các epoch.
 
 Ghi chú: list/train.txt, list/val.txt nên ở dạng dataset|D:\...\volume.npz để chạy chung nhiều bộ dữ liệu.
 Mẹo GPU: thêm --prefetch-gpu sẽ đẩy batch lên VRAM, giảm tải RAM khi train 2D/2.5D.
@@ -128,6 +128,8 @@ Các tùy chọn hay dùng:
 | --prefetch-gpu     | Prefetch batch lên GPU, giảm copy từ RAM |
 | --cache-mode cpu   | Cache toàn bộ volume trên RAM, giảm đọc đĩa |
 | --auto-gpu        | Bật AMP + prefetch và tăng batch/worker tùy VRAM |
+| --prefetch-factor | Điều chỉnh số batch được nạp sẵn mỗi worker (mặc định 2) |
+| --persistent-workers | Giữ DataLoader workers chạy xuyên suốt, giảm thời gian restart |
 | --run-tag exp1    | Gắn hậu tố vào thư mục run |
 
 Tip: Nếu GPU còn trống ≥12GB VRAM, thêm `--auto-gpu` để launcher tự bật mixed precision, prefetch và nâng batch size/worker. Khi VRAM thấp hơn, cấu hình sẽ giữ nguyên để tránh OOM.
@@ -148,7 +150,7 @@ Yêu cầu volume.npz cho từng dataset.
       --prefetch-gpu ^
       --amp
 
-Chu y: list/train.txt, list/val.txt nen o dang `dataset|D:\path\volume.npz`. Neu thieu nhan loader se tu doan theo thu muc (fastmri / kneemri / oaizib / combine).
+Chú ý: list/train.txt, list/val.txt nên ở dạng `dataset|D:\path\volume.npz`. Nếu thiếu nhãn, loader sẽ tự đoán theo thư mục (fastmri / kneemri / oaizib / combine).
 
 Các tùy chọn chính:
 | --pos-frac 0.5     | Tỷ lệ lấy patch dương |
@@ -161,9 +163,9 @@ Các tùy chọn chính:
 | --auto-gpu         | Tự động nâng batch size/prefetch/cache theo VRAM |
 | --prefetch-gpu     | Đẩy batch kế tiếp lên VRAM, giảm copy CPU->GPU |
 
-Ghi chu hieu nang:
+Ghi chú hiệu năng:
 - GPU: `--cache-mode gpu` giữ volume trên VRAM, training nhanh hơn nhưng tốn bộ nhớ GPU; script sẽ tự ép `workers=0`.
-- RAM: Neu RAM gần đầy hãy chuyển sang `--cache-mode cpu` hoặc `mmap`, cân nhắc bỏ `--prefetch-gpu`.
+- RAM: Nếu RAM gần đầy hãy chuyển sang `--cache-mode cpu` hoặc `mmap`, cân nhắc bỏ `--prefetch-gpu`.
 - CPU/disk: `--cache-mode none` phù hợp khi có NVMe nhanh, đổi lại CPU cao hơn.
 
 Khi GPU còn trống ≥28GB VRAM, `--auto-gpu` sẽ tự chuyển `cache_mode=gpu`, tăng batch size và bật prefetch. Nếu VRAM ít hơn, cấu hình được giữ nguyên để tránh thiếu bộ nhớ.
@@ -198,7 +200,5 @@ Ví dụ suy luận 2D:
       --run-tag combine ^
       --epochs 80
 - Thư mục run sẽ có hậu tố `_combine`.
-
- python src/train_unet_launcher.py --dataset combine --artifact-dir artifacts/combine --train-list lists/train_combine.txt --val-list lists/val_combine.txt --skip-preprocess --skip-split --run-tag combine.
 
 *** End Patch

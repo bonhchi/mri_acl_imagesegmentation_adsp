@@ -140,6 +140,8 @@ class UNet2DArgs:
     max_grad_norm: float = 5.0
     prefetch_gpu: bool = False
     auto_gpu: bool = False
+    prefetch_factor: int = 2
+    persistent_workers: bool = False
 
 
 def parse_args() -> UNet2DArgs:
@@ -190,6 +192,17 @@ def parse_args() -> UNet2DArgs:
         "--auto-gpu",
         action="store_true",
         help="Heuristically increase GPU utilisation (enables AMP, GPU prefetch, larger batch/workers when VRAM is available).",
+    )
+    p.add_argument(
+        "--prefetch-factor",
+        type=int,
+        default=2,
+        help="Number of batches prefetched per DataLoader worker (requires workers > 0).",
+    )
+    p.add_argument(
+        "--persistent-workers",
+        action="store_true",
+        help="Keep DataLoader workers alive across epochs to avoid re-fork overhead.",
     )
     a = p.parse_args()
     return UNet2DArgs(**vars(a))
@@ -283,21 +296,28 @@ class UNet2DTrainer:
         self.val_ds = KneeNPZ2DSlices(self.args.val_list, aug="none", **common)
         print(f"[data] Train slices by dataset: {self.train_ds.dataset_summary}")
         print(f"[data] Val slices by dataset:   {self.val_ds.dataset_summary}")
-        self.train_ld = DataLoader(
-            self.train_ds,
+        train_loader_kwargs: Dict[str, Any] = dict(
             batch_size=self.args.batch_size,
             shuffle=True,
             num_workers=self.args.workers,
             pin_memory=True,
             drop_last=True,
         )
-        self.val_ld = DataLoader(
-            self.val_ds,
+        val_loader_kwargs: Dict[str, Any] = dict(
             batch_size=max(1, self.args.batch_size // 2),
             shuffle=False,
             num_workers=self.args.workers,
             pin_memory=True,
         )
+        if self.args.workers > 0:
+            prefetch_factor = max(2, int(self.args.prefetch_factor))
+            train_loader_kwargs["prefetch_factor"] = prefetch_factor
+            val_loader_kwargs["prefetch_factor"] = max(2, prefetch_factor // 2) if prefetch_factor > 2 else prefetch_factor
+            if self.args.persistent_workers:
+                train_loader_kwargs["persistent_workers"] = True
+                val_loader_kwargs["persistent_workers"] = True
+        self.train_ld = DataLoader(self.train_ds, **train_loader_kwargs)
+        self.val_ld = DataLoader(self.val_ds, **val_loader_kwargs)
         if self.args.prefetch_gpu and self.device.type == "cuda":
             self.train_ld = DevicePrefetchLoader(self.train_ld, self.device)
             self.val_ld = DevicePrefetchLoader(self.val_ld, self.device)
@@ -327,6 +347,14 @@ class UNet2DTrainer:
         if free_gb >= 12 and self.args.workers < target_workers:
             adjustments.append(f"workers {self.args.workers} -> {target_workers}")
             self.args.workers = target_workers
+
+        if self.args.workers > 0 and self.args.prefetch_factor < 4:
+            adjustments.append(f"prefetch_factor {self.args.prefetch_factor} -> 4")
+            self.args.prefetch_factor = 4
+
+        if self.args.workers > 0 and not self.args.persistent_workers:
+            self.args.persistent_workers = True
+            adjustments.append("persistent_workers=ON")
 
         if not self.args.prefetch_gpu:
             self.args.prefetch_gpu = True
