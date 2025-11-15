@@ -10,7 +10,8 @@ import random
 
 from src.utils.listing import format_list_entries, infer_dataset_name
 
-ARTIFACT_DIR = pathlib.Path(r"D:\Master\ImageSegmentation\Demo\artifacts\fastmri_knee")
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+ARTIFACT_DIR = PROJECT_ROOT / "artifacts" / "fastmri_knee"
 OUTPUT_DIR = pathlib.Path("lists")
 SPLIT_RATIO = 0.8
 ALL_FILE = pathlib.Path("all.txt")
