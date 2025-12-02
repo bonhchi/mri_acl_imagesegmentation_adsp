@@ -1,11 +1,13 @@
 ###############################################################################
-# Core Deep Learning Stack (CUDA 12.8 + Python 3.13)
+# Core Deep Learning Stack (CUDA 12.x + Python 3.11)
 ###############################################################################
---extra-index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://download.pytorch.org/whl/cu121
 
-torch==2.7.1+cu128
-torchvision==0.22.1+cu128
-torchaudio==2.7.1+cu128
+# Các bản dưới phù hợp với Python 3.11 + CUDA 12.1.
+# Nếu bạn dùng CPU-only, bỏ extra-index và cài torch==2.5.1.
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+torchaudio==2.5.1+cu121
 
 ###############################################################################
 # Medical Imaging / Segmentation Framework
@@ -38,7 +40,7 @@ pyyaml>=6.0.2
 ###############################################################################
 # Model Utilities / Experiment Logging
 ###############################################################################
-tensorboard>=2.17.0
+tensorboard>=2.17.0,<2.16
 segmentation-models-pytorch>=0.3.3
 colorama>=0.4.6
 

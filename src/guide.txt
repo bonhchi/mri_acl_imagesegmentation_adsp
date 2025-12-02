@@ -202,3 +202,5 @@ Ví dụ suy luận 2D:
 - Thư mục run sẽ có hậu tố `_combine`.
 
 *** End Patch
+
+tensorboard --logdir runs --host 0.0.0.0 --port 6006

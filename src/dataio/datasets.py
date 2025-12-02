@@ -7,6 +7,7 @@ Nếu muốn dùng pretrained ImageNet: bật imagenet_norm -> replicate về 3 
 """
 from __future__ import annotations
 from pathlib import Path
+import logging
 import inspect
 import numpy as np
 import torch
@@ -96,6 +97,9 @@ def _build_aug(level: str):
     ])
 
 
+logger = logging.getLogger(__name__)
+
+
 class KneeNPZ2DSlices(Dataset):
     """
     list_txt: file txt, mỗi dòng là path tới 1 .npz (1 volume)
@@ -112,9 +116,34 @@ class KneeNPZ2DSlices(Dataset):
         cache_mode: str = "none",
     ):
         assert k >= 1 and k % 2 == 1, "k must be odd (1,3,5,...)"
-        self.entries: list[ListEntry] = parse_list_file(list_txt)
-        if not self.entries:
+        raw_entries: list[ListEntry] = parse_list_file(list_txt)
+        if not raw_entries:
             raise ValueError(f"No NPZ files found in {list_txt}")
+
+        missing: list[Path] = []
+        self.entries = []
+        for entry in raw_entries:
+            path = Path(entry.path)
+            if path.exists():
+                self.entries.append(entry)
+            else:
+                missing.append(path)
+
+        if missing:
+            preview = "\n    ".join(str(p) for p in missing[:5])
+            logger.warning(
+                "Skipped %d NPZ volumes listed in %s because they do not exist on disk.\n    %s%s",
+                len(missing),
+                list_txt,
+                preview,
+                "\n    ..." if len(missing) > 5 else "",
+            )
+
+        if not self.entries:
+            raise FileNotFoundError(
+                f"None of the NPZ volumes referenced by {list_txt} exist on disk. "
+                "Double-check that you have exported the dataset or that the list file points to the right directory."
+            )
 
         self.files = [Path(entry.path) for entry in self.entries]
         self.dataset_summary = summarise_entries(self.entries)
